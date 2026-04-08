@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "BenchmarkApp (mit Konsole)",
+            "request": "launch",
+            "mainClass": "demo.BenchmarkApp",
+            "cwd": "${workspaceFolder}/out",
+            "vmArgs": "-Djava.library.path=.",
+            "console": "integratedTerminal"
+        },
+        {
+            "type": "java",
+            "name": "DemoApp",
+            "request": "launch",
+            "mainClass": "demo.DemoApp",
+            "cwd": "${workspaceFolder}/out",
+            "vmArgs": "-Djava.library.path=."
+        },
+        {
+            "type": "java",
+            "name": "SimpleTest",
+            "request": "launch",
+            "mainClass": "demo.SimpleTest",
+            "cwd": "${workspaceFolder}/out",
+            "vmArgs": "-Djava.library.path=."
+        }
+    ]
+}
