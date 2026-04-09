@@ -279,4 +279,4 @@ See [LICENSE](LICENSE) for details.
 
 ---
 
-**Built with ❤️ by the FastJava Team** — Making Java fast again!
+**Built with ❤️** — Making Java fast again!
