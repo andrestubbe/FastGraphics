@@ -174,16 +174,43 @@ java -cp out demo.Comparator
 
 ### Core Methods
 
-| Method | Description |
-|--------|-------------|
-| `FastGraphics2D.create(hwnd, w, h)` | Create rendering context |
-| `setColor(Color c)` | Set current drawing color |
-| `fillRect(x, y, w, h)` | Fill rectangle (batched) |
-| `fillOval(x, y, w, h)` | Fill oval/circle |
-| `drawRect(x, y, w, h)` | Draw rectangle outline |
-| `fill(Shape s)` | Fill any Shape (Rectangle2D, etc.) |
-| `clear()` / `clear(Color c)` | Clear background |
-| `present()` | Display rendered frame |
+| Method | Description | Status |
+|--------|-------------|--------|
+| `FastGraphics2D.create(hwnd, w, h)` | Create rendering context | ✅ Implemented |
+| `setColor(Color c)` | Set current drawing color | ✅ Implemented |
+| `fillRect(x, y, w, h)` | Fill rectangle (batched) | ✅ Implemented |
+| `fillOval(x, y, w, h)` | Fill oval/circle | ✅ Implemented |
+| `drawRect(x, y, w, h)` | Draw rectangle outline | ✅ Implemented |
+| `drawOval(x, y, w, h)` | Draw oval/circle outline | ✅ Implemented |
+| `drawLine(x1, y1, x2, y2)` | Draw line | ✅ Implemented |
+| `drawPolygon(xPoints, yPoints)` | Draw polygon outline | ✅ Implemented |
+| `fillPolygon(xPoints, yPoints)` | Fill polygon (convex) | ✅ Implemented |
+| `drawArc(x, y, w, h, startAngle, arcAngle)` | Draw arc | ✅ Implemented |
+| `fillArc(x, y, w, h, startAngle, arcAngle)` | Fill arc | ✅ Implemented |
+| `drawRoundRect(x, y, w, h, arcWidth, arcHeight)` | Draw rounded rectangle | ⚠️ Stub (draws as rect) |
+| `fillRoundRect(x, y, w, h, arcWidth, arcHeight)` | Fill rounded rectangle | ⚠️ Stub (fills as rect) |
+| `translate(tx, ty)` | Translate coordinate system | ✅ Implemented |
+| `scale(sx, sy)` | Scale coordinate system | ✅ Implemented |
+| `rotate(angle)` | Rotate coordinate system | ✅ Implemented |
+| `resetTransform()` | Reset transformations | ✅ Implemented |
+| `setStroke(Stroke s)` | Set line stroke | ⚠️ Stub (stores only) |
+| `setRenderingHint(key, value)` | Set rendering hint | ⚠️ Stub (stores only) |
+| `getRenderingHint(key)` | Get rendering hint | ✅ Implemented |
+| `setClip(x, y, w, h)` | Set clipping rectangle | ⚠️ Stub (stores only) |
+| `resetClip()` | Reset clipping | ⚠️ Stub (stores only) |
+| `drawString(str, x, y)` | Draw text string | ⚠️ Stub (no effect) |
+| `drawImage(x, y, w, h)` | Draw image | ⚠️ Stub (no effect) |
+| `clear()` / `clear(Color c)` | Clear background | ✅ Implemented |
+| `present()` | Display rendered frame | ✅ Implemented |
+
+### Known Limitations
+
+- **AntiAliasing**: RenderingHints.KEY_ANTIALIASING is supported via API, but DirectX 11 MSAA requires Swap Chain configuration (not runtime-switchable)
+- **Clipping**: setClip()/resetClip() store values but don't apply clipping (requires Scissor Rects or Stencil Buffer)
+- **Line Width**: setStroke() stores line width but doesn't apply it to rendering
+- **Text Rendering**: drawString() is a stub (requires textured shaders and font rendering)
+- **Image Rendering**: drawImage() is a stub (requires textured shaders)
+- **Rounded Rectangles**: drawRoundRect()/fillRoundRect() are stubs (complex geometry causes crashes)
 
 ### State Management
 
