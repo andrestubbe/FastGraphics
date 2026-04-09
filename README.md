@@ -1,5 +1,7 @@
 # FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
 
+> **🚧 WORK IN PROGRESS** - This is an active development project. See [TODO.md](TODO.md) for remaining features.
+
 **⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
