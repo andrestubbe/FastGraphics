@@ -8,8 +8,6 @@
 [![Java](https://img.shields.io/badge/Java-17+-blue.svg)](https://www.java.com)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![JitPack](https://jitpack.io/v/andrestubbe/FastGraphics.svg)](https://jitpack.io/#andrestubbe/FastGraphics)
-[![Maven Central](https://img.shields.io/maven-central/v/io.github.andrestubbe/fastgraphics.svg)](https://search.maven.org/artifact/io.github.andrestubbe/fastgraphics)
 
 ![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png)
 
@@ -36,7 +34,6 @@ If you need **thousands of shapes at 60fps+**, **batch rendering**, or **GPU-acc
 - [Why FastGraphics?](#why-fastgraphics)
 - [Performance Benchmarks](#performance-benchmarks)
 - [FastGraphics vs java.awt.Graphics2D](#fastgraphics-vs-javaawtgraphics2d)
-- [Installation](#installation)
 - [Quick Start](#quick-start)
 - [API Reference](#api-reference)
 - [TV Test Pattern Demo](#tv-test-pattern-demo)
@@ -83,34 +80,6 @@ FastGraphics solves this with:
 | Instanced Rendering | ❌ No | ✅ Yes (76% less bandwidth) |
 | Memory Pressure | High (GC) | **Zero (Direct Buffers)** |
 | Cross-Platform | ✅ All platforms | Windows (DX11) |
-
----
-
-## Installation
-
-### Maven
-```xml
-<dependency>
-    <groupId>io.github.andrestubbe</groupId>
-    <artifactId>fastgraphics</artifactId>
-    <version>1.0.0</version>
-</dependency>
-```
-
-### Gradle
-```gradle
-dependencies {
-    implementation 'io.github.andrestubbe:fastgraphics:1.0.0'
-}
-```
-
-### JitPack
-```xml
-<repository>
-    <id>jitpack.io</id>
-    <url>https://jitpack.io</url>
-</repository>
-```
 
 ---
 
