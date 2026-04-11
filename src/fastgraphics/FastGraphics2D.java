@@ -2,6 +2,10 @@ package fastgraphics;
 
 import java.awt.Color;
 import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * FastGraphics2D - GPU-beschleunigtes Graphics2D mit Batching
@@ -43,6 +47,9 @@ public class FastGraphics2D {
     private static native void resetClipNative();
     private static native void drawStringNative(String str, float x, float y, float r, float g, float b);
     private static native void drawImageNative(float x, float y, float w, float h);
+    private static native int loadTextureNative(int[] pixels, int width, int height);
+    private static native void unloadTextureNative(int textureId);
+    private static native void drawTexturedQuadNative(int textureId, float x, float y, float w, float h);
     
     static { System.loadLibrary("FastGraphics"); }
     
@@ -51,6 +58,9 @@ public class FastGraphics2D {
     
     // Rendering Hints
     private Object antiAliasing = RenderingHints.VALUE_ANTIALIAS_DEFAULT;
+    
+    // Texture Cache: BufferedImage -> DirectX Texture ID
+    private final Map<BufferedImage, Integer> textureCache = new WeakHashMap<>();
     
     // Batch-Buffer: 6 Vertices pro Rechteck (2 Dreiecke)
     // Format: x, y, r, g, b für jeden Vertex
@@ -64,13 +74,13 @@ public class FastGraphics2D {
     private static final int FLOATS_PER_VERTEX = 5; // x, y, r, g, b
     private static final int FLOATS_PER_RECT = VERTICES_PER_RECT * FLOATS_PER_VERTEX;
     
-    public FastGraphics2D(int hwnd, int batchSize) {
+    public FastGraphics2D(long hwnd, int batchSize) {
         init(hwnd);
         this.maxRects = batchSize;
         this.batchBuffer = new float[maxRects * FLOATS_PER_RECT];
     }
     
-    public FastGraphics2D(int hwnd) {
+    public FastGraphics2D(long hwnd) {
         this(hwnd, DEFAULT_BATCH_SIZE);
     }
     
@@ -340,13 +350,58 @@ public class FastGraphics2D {
 
     /**
      * Zeichnet ein Bild (wie Graphics2D.drawImage)
-     * HINWEIS: In DirectX 11 erfordert dies texturierte Shader - sehr komplex
-     * Aktuell ist dies nur ein Stub
+     * Verwendet internes Caching - gleiches Bild wird nur einmal als Textur hochgeladen
      */
-    public void drawImage(float x, float y, float w, float h) {
+    public void drawImage(BufferedImage img, float x, float y, float w, float h) {
         flush();
 
-        drawImageNative(x, y, w, h);
+        // Check cache
+        Integer textureId = textureCache.get(img);
+        
+        if (textureId == null) {
+            // Load texture
+            textureId = loadTexture(img);
+            if (textureId >= 0) {
+                textureCache.put(img, textureId);
+            }
+        }
+        
+        if (textureId != null && textureId >= 0) {
+            drawTexturedQuadNative(textureId, x, y, w, h);
+        }
+    }
+    
+    /**
+     * Entfernt ein Bild aus dem Cache und gibt die DirectX-Textur frei
+     */
+    public void disposeImage(BufferedImage img) {
+        Integer textureId = textureCache.remove(img);
+        if (textureId != null && textureId >= 0) {
+            unloadTextureNative(textureId);
+        }
+    }
+    
+    /**
+     * Lädt ein BufferedImage als DirectX-Textur
+     */
+    private int loadTexture(BufferedImage img) {
+        // Ensure ARGB format
+        BufferedImage argbImg;
+        if (img.getType() != BufferedImage.TYPE_INT_ARGB) {
+            argbImg = new BufferedImage(img.getWidth(), img.getHeight(), BufferedImage.TYPE_INT_ARGB);
+            argbImg.getGraphics().drawImage(img, 0, 0, null);
+            argbImg.getGraphics().dispose();
+        } else {
+            argbImg = img;
+        }
+        
+        int width = argbImg.getWidth();
+        int height = argbImg.getHeight();
+        
+        // Get pixel data
+        int[] pixels = ((DataBufferInt) argbImg.getRaster().getDataBuffer()).getData();
+        
+        return loadTextureNative(pixels, width, height);
     }
 
     private int currentVertexOffset = 0;

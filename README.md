@@ -1,6 +1,6 @@
 # FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
 
-> **🚧 WORK IN PROGRESS** - This is an active development project. See [TODO.md](TODO.md) for remaining features.
+> **� MAJOR UPDATE** - `drawImage()` now fully implemented with GPU texture caching! See [TODO.md](TODO.md) for remaining features.
 
 **⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
 
@@ -15,7 +15,7 @@
 
 ```java
 // Quick Start — Ultra-fast 2D rendering
-FastGraphics2D g = FastGraphics2D.create(hwnd, 800, 600);
+FastGraphics2D g = new FastGraphics2D(hwnd);
 g.setColor(Color.RED);
 g.fillRect(10, 10, 100, 50);
 g.setColor(Color.BLUE);
@@ -132,7 +132,7 @@ public class QuickStart {
         long hwnd = FastGraphics2D.findWindow("FastGraphics Demo");
         
         // Create FastGraphics context
-        FastGraphics2D g = FastGraphics2D.create(hwnd, 800, 600);
+        FastGraphics2D g = new FastGraphics2D(hwnd);
         
         // Render loop
         while (frame.isVisible()) {
@@ -178,7 +178,7 @@ java -cp out demo.Comparator
 
 | Method | Description | Status |
 |--------|-------------|--------|
-| `FastGraphics2D.create(hwnd, w, h)` | Create rendering context | ✅ Implemented |
+| `new FastGraphics2D(hwnd)` | Create rendering context | ✅ Implemented |
 | `setColor(Color c)` | Set current drawing color | ✅ Implemented |
 | `fillRect(x, y, w, h)` | Fill rectangle (batched) | ✅ Implemented |
 | `fillOval(x, y, w, h)` | Fill oval/circle | ✅ Implemented |
@@ -201,7 +201,7 @@ java -cp out demo.Comparator
 | `setClip(x, y, w, h)` | Set clipping rectangle | ⚠️ Stub (stores only) |
 | `resetClip()` | Reset clipping | ⚠️ Stub (stores only) |
 | `drawString(str, x, y)` | Draw text string | ⚠️ Stub (no effect) |
-| `drawImage(x, y, w, h)` | Draw image | ⚠️ Stub (no effect) |
+| `drawImage(img, x, y, w, h)` | Draw image (GPU-accelerated with caching) | ✅ Implemented |
 | `clear()` / `clear(Color c)` | Clear background | ✅ Implemented |
 | `present()` | Display rendered frame | ✅ Implemented |
 
@@ -211,7 +211,7 @@ java -cp out demo.Comparator
 - **Clipping**: setClip()/resetClip() store values but don't apply clipping (requires Scissor Rects or Stencil Buffer)
 - **Line Width**: setStroke() stores line width but doesn't apply it to rendering
 - **Text Rendering**: drawString() is a stub (requires textured shaders and font rendering)
-- **Image Rendering**: drawImage() is a stub (requires textured shaders)
+- **Image Rendering**: drawImage() is fully implemented with GPU texture caching
 - **Rounded Rectangles**: drawRoundRect()/fillRoundRect() are stubs (complex geometry causes crashes)
 
 ### State Management

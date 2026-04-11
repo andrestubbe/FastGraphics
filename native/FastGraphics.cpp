@@ -22,6 +22,22 @@ static ID3D11VertexShader* g_vs = nullptr;
 static ID3D11PixelShader* g_ps = nullptr;
 static ID3D11InputLayout* g_layout = nullptr;
 
+// Texture management
+static ID3D11VertexShader* g_vsTextured = nullptr;
+static ID3D11PixelShader* g_psTextured = nullptr;
+static ID3D11InputLayout* g_layoutTextured = nullptr;
+static ID3D11Buffer* g_texturedVB = nullptr;
+static ID3D11SamplerState* g_sampler = nullptr;
+
+// Texture cache: ID -> {texture, srv}
+struct TextureEntry {
+    ID3D11Texture2D* texture;
+    ID3D11ShaderResourceView* srv;
+};
+#include <map>
+static std::map<int, TextureEntry> g_textureCache;
+static int g_nextTextureId = 1;
+
 // Standard vertex shader
 const char* VS_SRC = R"(
     struct VS_INPUT {
@@ -88,6 +104,43 @@ const char* PS_SRC = R"(
     }
 )";
 
+// Textured shaders for image rendering
+const char* VS_TEXTURED_SRC = R"(
+    struct VS_INPUT {
+        float2 pos : POSITION;
+        float2 uv : TEXCOORD;
+    };
+    struct VS_OUTPUT {
+        float4 pos : SV_POSITION;
+        float2 uv : TEXCOORD;
+    };
+    cbuffer ScreenCB : register(b0) {
+        float2 screenSize;
+    };
+    VS_OUTPUT main(VS_INPUT input) {
+        VS_OUTPUT output;
+        float2 pixelPos = input.pos;
+        float2 clipPos;
+        clipPos.x = ((pixelPos.x + 0.5) / screenSize.x) * 2.0 - 1.0;
+        clipPos.y = 1.0 - ((pixelPos.y + 0.5) / screenSize.y) * 2.0;
+        output.pos = float4(clipPos, 0.0, 1.0);
+        output.uv = input.uv;
+        return output;
+    }
+)";
+
+const char* PS_TEXTURED_SRC = R"(
+    struct PS_INPUT {
+        float4 pos : SV_POSITION;
+        float2 uv : TEXCOORD;
+    };
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+    float4 main(PS_INPUT input) : SV_TARGET {
+        return tex.Sample(samp, input.uv);
+    }
+)";
+
 bool CompileShader(const char* src, const char* entry, const char* target, ID3DBlob** blob) {
     ID3DBlob* err = nullptr;
     if (FAILED(D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, target, 0, 0, blob, &err))) {
@@ -139,9 +192,16 @@ static void ApplyTransform(float* x, float* y) {
 extern "C" {
 
 JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
+    fprintf(stderr, "[FastGraphics] DemoApp_init: hwnd=%lld\n", hwnd);
     HWND h = (HWND)hwnd;
-    RECT rc; GetClientRect(h, &rc);
+    fprintf(stderr, "[FastGraphics] DemoApp_init: calling GetClientRect...\n");
+    RECT rc; 
+    if (!GetClientRect(h, &rc)) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: GetClientRect FAILED!\n");
+        return;
+    }
     int w = rc.right - rc.left, h2 = rc.bottom - rc.top;
+    fprintf(stderr, "[FastGraphics] DemoApp_init: client size %dx%d\n", w, h2);
     
     DXGI_SWAP_CHAIN_DESC sd = {};
     sd.BufferCount = 1;
@@ -156,17 +216,41 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
     sd.Windowed = TRUE;
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     
-    D3D_FEATURE_LEVEL fl;
-    D3D11CreateDeviceAndSwapChain(
+    fprintf(stderr, "[FastGraphics] DemoApp_init: creating D3D11 device...\n");
+    auto fl = D3D_FEATURE_LEVEL_11_0;
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
         &fl, 1, D3D11_SDK_VERSION, &sd,
         &g_swapChain, &g_device, nullptr, &g_context);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: D3D11CreateDeviceAndSwapChain FAILED! hr=0x%08X\n", hr);
+        return;
+    }
+    fprintf(stderr, "[FastGraphics] DemoApp_init: D3D11 device created OK\n");
     
     ID3D11Texture2D* backBuffer = nullptr;
-    g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
-    g_device->CreateRenderTargetView(backBuffer, nullptr, &g_rtv);
+    fprintf(stderr, "[FastGraphics] DemoApp_init: getting backbuffer...\n");
+    HRESULT hr2 = g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
+    if (FAILED(hr2) || !backBuffer) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: GetBuffer FAILED! hr=0x%08X, backBuffer=%p\n", hr2, backBuffer);
+        return;
+    }
+    fprintf(stderr, "[FastGraphics] DemoApp_init: got backbuffer OK\n");
+    fprintf(stderr, "[FastGraphics] DemoApp_init: creating RTV...\n");
+    if (!g_device) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: ERROR g_device is null!\n");
+        return;
+    }
+    HRESULT hr3 = g_device->CreateRenderTargetView(backBuffer, nullptr, &g_rtv);
+    if (FAILED(hr3)) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: CreateRenderTargetView FAILED! hr=0x%08X\n", hr3);
+        backBuffer->Release();
+        return;
+    }
+    fprintf(stderr, "[FastGraphics] DemoApp_init: RTV created OK\n");
     backBuffer->Release();
     
+    fprintf(stderr, "[FastGraphics] DemoApp_init: setting viewport...\n");
     D3D11_VIEWPORT vp = {};
     vp.Width = (FLOAT)w;
     vp.Height = (FLOAT)h2;
@@ -175,11 +259,21 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
     g_context->RSSetViewports(1, &vp);
+    fprintf(stderr, "[FastGraphics] DemoApp_init: viewport set OK\n");
     
-    // Compile standard shaders
+    fprintf(stderr, "[FastGraphics] DemoApp_init: compiling shaders...\n");
     ID3D10Blob* vsBlob = nullptr, * psBlob = nullptr;
-    D3DCompile(VS_SRC, strlen(VS_SRC), nullptr, nullptr, nullptr, "VSMain", "vs_4_0", 0, 0, &vsBlob, nullptr);
-    D3DCompile(PS_SRC, strlen(PS_SRC), nullptr, nullptr, nullptr, "PSMain", "ps_4_0", 0, 0, &psBlob, nullptr);
+    if (!CompileShader(VS_SRC, "main", "vs_4_0", &vsBlob)) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: VS compile FAILED!\n");
+        return;
+    }
+    fprintf(stderr, "[FastGraphics] DemoApp_init: VS compiled OK\n");
+    if (!CompileShader(PS_SRC, "main", "ps_4_0", &psBlob)) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: PS compile FAILED!\n");
+        vsBlob->Release();
+        return;
+    }
+    fprintf(stderr, "[FastGraphics] DemoApp_init: PS compiled OK\n");
     g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs);
     g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps);
     
@@ -245,6 +339,42 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_clear(JNIEnv*, jclass, jfloat r, jfloat
 
 JNIEXPORT void JNICALL Java_demo_DemoApp_present(JNIEnv*, jclass) {
     if (g_swapChain) g_swapChain->Present(0, 0);
+}
+
+// renderBatch implementation for FastGraphics2D
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_renderBatch(JNIEnv* env, jclass, jfloatArray vertices, jint count) {
+    if (!g_device || !g_context || !g_rtv) return;
+    
+    jfloat* verts = env->GetFloatArrayElements(vertices, nullptr);
+    if (!verts) return;
+    
+    // Set render target
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+    
+    // Create/update vertex buffer
+    if (g_vb) g_vb->Release();
+    D3D11_BUFFER_DESC bd = {};
+    bd.ByteWidth = count * 5 * sizeof(float); // count vertices * 5 floats (x,y,r,g,b)
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd = { verts };
+    g_device->CreateBuffer(&bd, &sd, &g_vb);
+    
+    env->ReleaseFloatArrayElements(vertices, verts, JNI_ABORT);
+    
+    // Setup input layout and shaders
+    g_context->IASetInputLayout(g_layout);
+    g_context->VSSetShader(g_vs, nullptr, 0);
+    g_context->PSSetShader(g_ps, nullptr, 0);
+    
+    // Set vertex buffer
+    UINT stride = 5 * sizeof(float);
+    UINT offset = 0;
+    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    
+    // Draw
+    g_context->Draw(count, 0);
 }
 
 JNIEXPORT jlong JNICALL Java_demo_DemoApp_findWindow(JNIEnv* env, jclass, jstring title) {
@@ -955,8 +1085,194 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawImageNative(JNIEnv*,
     // Stub: image rendering not supported (requires textured shaders)
 }
 
+// Initialize textured rendering resources (called on first texture operation)
+static void InitTexturedRendering() {
+    if (g_vsTextured) return; // Already initialized
+    if (!g_device) {
+        fprintf(stderr, "[FastGraphics] InitTexturedRendering: g_device is null!\n");
+        return;
+    }
+    
+    // Compile shaders
+    ID3DBlob* vsBlob = nullptr;
+    ID3DBlob* psBlob = nullptr;
+    
+    if (CompileShader(VS_TEXTURED_SRC, "main", "vs_4_0", &vsBlob)) {
+        g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vsTextured);
+        
+        // Input layout for textured vertices (position + uv)
+        D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        };
+        g_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layoutTextured);
+        vsBlob->Release();
+    }
+    
+    if (CompileShader(PS_TEXTURED_SRC, "main", "ps_4_0", &psBlob)) {
+        g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_psTextured);
+        psBlob->Release();
+    }
+    
+    // Create sampler state
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+    g_device->CreateSamplerState(&sampDesc, &g_sampler);
+    
+    // Create static quad vertex buffer (will be updated per draw)
+    float quadVertices[] = {
+        // Position    UV
+        0.0f, 0.0f,   0.0f, 0.0f,
+        1.0f, 0.0f,   1.0f, 0.0f,
+        0.0f, 1.0f,   0.0f, 1.0f,
+        1.0f, 1.0f,   1.0f, 1.0f
+    };
+    
+    D3D11_BUFFER_DESC bd = {};
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.ByteWidth = sizeof(quadVertices);
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_device->CreateBuffer(&bd, nullptr, &g_texturedVB);
+}
+
+JNIEXPORT jint JNICALL Java_fastgraphics_FastGraphics2D_loadTextureNative(JNIEnv* env, jclass, jintArray pixelData, jint width, jint height) {
+    if (!g_device) {
+        fprintf(stderr, "[FastGraphics] loadTextureNative: g_device is null!\n");
+        return -1;
+    }
+    
+    InitTexturedRendering();
+    
+    jint* pixels = env->GetIntArrayElements(pixelData, nullptr);
+    if (!pixels) return -1;
+    
+    // Create texture
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = pixels;
+    initData.SysMemPitch = width * 4;
+    
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    
+    if (FAILED(g_device->CreateTexture2D(&texDesc, &initData, &texture))) {
+        env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
+        return -1;
+    }
+    
+    if (FAILED(g_device->CreateShaderResourceView(texture, nullptr, &srv))) {
+        texture->Release();
+        env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
+        return -1;
+    }
+    
+    env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
+    
+    // Store in cache
+    int id = g_nextTextureId++;
+    g_textureCache[id] = { texture, srv };
+    
+    return id;
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_unloadTextureNative(JNIEnv*, jclass, jint textureId) {
+    auto it = g_textureCache.find(textureId);
+    if (it != g_textureCache.end()) {
+        if (it->second.srv) it->second.srv->Release();
+        if (it->second.texture) it->second.texture->Release();
+        g_textureCache.erase(it);
+    }
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawTexturedQuadNative(JNIEnv*, jclass, jint textureId, jfloat x, jfloat y, jfloat w, jfloat h) {
+    if (!g_device || !g_context) return;
+    
+    auto it = g_textureCache.find(textureId);
+    if (it == g_textureCache.end()) return;
+    
+    D3D11_VIEWPORT vp; UINT num = 1;
+    g_context->RSGetViewports(&num, &vp);
+    
+    // Ensure screen constant buffer exists
+    if (!g_screenCB) {
+        D3D11_BUFFER_DESC cbd = {};
+        cbd.Usage = D3D11_USAGE_DYNAMIC;
+        cbd.ByteWidth = 16;
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        g_device->CreateBuffer(&cbd, nullptr, &g_screenCB);
+    }
+    
+    // Update vertex buffer with quad positions
+    float vertices[] = {
+        // Position      UV
+        x,     y,       0.0f, 0.0f,
+        x + w, y,       1.0f, 0.0f,
+        x,     y + h,  0.0f, 1.0f,
+        x + w, y + h,  1.0f, 1.0f
+    };
+    
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (SUCCEEDED(g_context->Map(g_texturedVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        memcpy(mapped.pData, vertices, sizeof(vertices));
+        g_context->Unmap(g_texturedVB, 0);
+    }
+    
+    // Update screen constant buffer
+    D3D11_MAPPED_SUBRESOURCE cbMapped;
+    if (SUCCEEDED(g_context->Map(g_screenCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMapped))) {
+        float* cbData = (float*)cbMapped.pData;
+        cbData[0] = (float)vp.Width;
+        cbData[1] = (float)vp.Height;
+        g_context->Unmap(g_screenCB, 0);
+    }
+    
+    // Set render state
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+    g_context->VSSetShader(g_vsTextured, nullptr, 0);
+    g_context->VSSetConstantBuffers(0, 1, &g_screenCB);
+    g_context->PSSetShader(g_psTextured, nullptr, 0);
+    g_context->PSSetShaderResources(0, 1, &it->second.srv);
+    g_context->PSSetSamplers(0, 1, &g_sampler);
+    g_context->IASetInputLayout(g_layoutTextured);
+    
+    UINT stride = 16; // 4 floats per vertex
+    UINT offset = 0;
+    g_context->IASetVertexBuffers(0, 1, &g_texturedVB, &stride, &offset);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    
+    // Draw
+    g_context->Draw(4, 0);
+    
+    // Unbind texture to avoid conflicts with other shaders
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    g_context->PSSetShaderResources(0, 1, &nullSrv);
+}
+
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_init(JNIEnv*, jclass, jlong hwnd) {
+    fprintf(stderr, "[FastGraphics] init called with hwnd=%lld\n", hwnd);
     Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
+    if (g_device) {
+        fprintf(stderr, "[FastGraphics] g_device initialized OK\n");
+    } else {
+        fprintf(stderr, "[FastGraphics] ERROR: g_device is NULL!\n");
+    }
 }
 
 JNIEXPORT void JNICALL Java_demo_BenchmarkApp_init(JNIEnv*, jclass, jlong hwnd) {
