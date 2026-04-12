@@ -9,7 +9,8 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png)
+<!-- TODO: Add benchmark image here when available -->
+<!-- ![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png) -->
 
 ```java
 // Quick Start — Ultra-fast 2D rendering
@@ -134,9 +135,10 @@ public class QuickStart {
 
 FastGraphics includes a classic **80s TV Test Pattern** demo for visual validation:
 
-![TV Test Pattern Comparison](docs/tv-test-pattern.png)
+<!-- TODO: Add TV test pattern image here when available -->
+<!-- ![TV Test Pattern Comparison](docs/tv-test-pattern.png) -->
 
-The test renders identical patterns in both FastGraphics (left) and Java2D (right) for pixel-perfect comparison. This validates:
+The test renders identical patterns in both FastGraphics and Java2D for pixel-perfect comparison. This validates:
 - ✅ Color accuracy (Color Bars)
 - ✅ Geometric precision (Convergence Circles)
 - ✅ Gradient rendering (Shade Bars)
