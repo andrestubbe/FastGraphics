@@ -46,12 +46,12 @@ This document tracks remaining features needed to make FastGraphics a complete G
   - [ ] Implement `getClip()` to retrieve current clip
 
 ### Line Width & Stroke
-- [ ] Implement proper `setStroke(Stroke s)` functionality
-  - [ ] Support line width (basic stroke width)
+- [x] Implement proper `setStroke(Stroke s)` functionality
+  - [x] Support line width (basic stroke width)
   - [ ] Support dashed lines
   - [ ] Support line caps (ROUND, BUTT, SQUARE)
   - [ ] Support line joins (ROUND, BEVEL, MITER)
-  - [ ] Update geometry generation for thick lines
+  - [x] Update geometry generation for thick lines
 
 ### Anti-Aliasing
 - [ ] Implement proper anti-aliasing support

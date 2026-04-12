@@ -174,7 +174,7 @@ java -cp out demo.Comparator
 | `scale(sx, sy)` | Scale coordinate system | ✅ Implemented |
 | `rotate(angle)` | Rotate coordinate system | ✅ Implemented |
 | `resetTransform()` | Reset transformations | ✅ Implemented |
-| `setStroke(Stroke s)` | Set line stroke | ⚠️ Stub (stores only) |
+| `setStroke(float lineWidth)` | Set line width for drawing | ✅ Implemented |
 | `setRenderingHint(key, value)` | Set rendering hint | ⚠️ Stub (stores only) |
 | `getRenderingHint(key)` | Get rendering hint | ✅ Implemented |
 | `setClip(x, y, w, h)` | Set clipping rectangle | ⚠️ Stub (stores only) |
@@ -188,7 +188,7 @@ java -cp out demo.Comparator
 
 - **AntiAliasing**: RenderingHints.KEY_ANTIALIASING is supported via API, but DirectX 11 MSAA requires Swap Chain configuration (not runtime-switchable)
 - **Clipping**: setClip()/resetClip() store values but don't apply clipping (requires Scissor Rects or Stencil Buffer)
-- **Line Width**: setStroke() stores line width but doesn't apply it to rendering
+- **Line Width**: ✅ Now implemented! Use `setStroke(width)` for thick lines
 - **Text Rendering**: drawString() is a stub (requires textured shaders and font rendering)
 - **Image Rendering**: drawImage() is fully implemented with GPU texture caching
 - **Alpha Transparency**: Now fully supported! Use `new Color(r, g, b, alpha)` for transparent shapes

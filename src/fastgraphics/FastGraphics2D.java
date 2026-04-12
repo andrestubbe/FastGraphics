@@ -41,6 +41,7 @@ public class FastGraphics2D {
     private static native void scaleNative(float sx, float sy);
     private static native void rotateNative(float angle);
     private static native void resetTransformNative();
+    private static native void setUIScaleNative(float scale);
     private static native void setStrokeNative(float lineWidth);
     private static native void setAntiAliasingNative(boolean enabled);
     private static native void setClipNative(float x, float y, float w, float h);
@@ -304,6 +305,14 @@ public class FastGraphics2D {
      */
     public void setStroke(float lineWidth) {
         setStrokeNative(lineWidth);
+    }
+
+    /**
+     * Setzt den UI-Skalierungsfaktor für High-DPI-Displays (z.B. 200% Windows Scaling)
+     * @param scale UI-Scale: 1.0 = 100% (Standard), 2.0 = 200% (High DPI), 1.5 = 150%, etc.
+     */
+    public void setUIScale(float scale) {
+        setUIScaleNative(scale);
     }
 
     /**

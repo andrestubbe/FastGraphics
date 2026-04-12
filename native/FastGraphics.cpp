@@ -150,8 +150,11 @@ bool CompileShader(const char* src, const char* entry, const char* target, ID3DB
     return true;
 }
 
-float ToNDC_X(float x, float w) { return (x / w) * 2.0f - 1.0f; }
-float ToNDC_Y(float y, float h) { return 1.0f - (y / h) * 2.0f; }
+// UI Scale for High DPI displays (1.0 = 100%, 2.0 = 200%)
+static float g_uiScale = 1.0f;
+
+float ToNDC_X(float x, float w) { return ((x * g_uiScale) / w) * 2.0f - 1.0f; }
+float ToNDC_Y(float y, float h) { return 1.0f - ((y * g_uiScale) / h) * 2.0f; }
 
 // Transformation state
 static float g_translateX = 0.0f;
@@ -817,12 +820,58 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, 
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
 
-    float nx1 = ToNDC_X(x1, vp.Width), ny1 = ToNDC_Y(y1, vp.Height);
-    float nx2 = ToNDC_X(x2, vp.Width), ny2 = ToNDC_Y(y2, vp.Height);
+    // Calculate perpendicular offset for thick lines
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
 
+    if (len < 0.0001f) {
+        // Zero-length line, draw a point
+        float nx = ToNDC_X(x1, vp.Width), ny = ToNDC_Y(y1, vp.Height);
+        float vertices[] = { nx, ny, r, g, b, a };
+        if (g_vb) g_vb->Release();
+        D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+        D3D11_SUBRESOURCE_DATA sd = { vertices };
+        g_device->CreateBuffer(&bd, &sd, &g_vb);
+        UINT stride = 24, offset = 0;
+        g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
+        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        g_context->Draw(1, 0);
+        return;
+    }
+
+    // Normal vector (perpendicular to line)
+    float nx = -dy / len;
+    float ny = dx / len;
+
+    // Half-width offset
+    float hw = g_lineWidth / 2.0f;
+    float ox = nx * hw;
+    float oy = ny * hw;
+
+    // Quad corners (2 triangles) - define in clockwise order for DirectX
+    // For a thick line, we create a rectangle perpendicular to the line
+    float x1a = x1 + ox, y1a = y1 + oy;  // start + offset
+    float x1b = x1 - ox, y1b = y1 - oy;  // start - offset
+    float x2a = x2 + ox, y2a = y2 + oy;  // end + offset
+    float x2b = x2 - ox, y2b = y2 - oy;  // end - offset
+
+    // Quad layout:
+    //   x1a,y1a -------- x2a,y2a
+    //      |                |
+    //   x1b,y1b -------- x2b,y2b
+    //
+    // Triangle 1 (CCW): x1a, x1b, x2a
+    // Triangle 2 (CCW): x1b, x2b, x2a
     float vertices[] = {
-        nx1, ny1, r, g, b, a,
-        nx2, ny2, r, g, b, a
+        // Triangle 1: top-left, bottom-left, top-right
+        ToNDC_X(x1a, vp.Width), ToNDC_Y(y1a, vp.Height), r, g, b, a,
+        ToNDC_X(x1b, vp.Width), ToNDC_Y(y1b, vp.Height), r, g, b, a,
+        ToNDC_X(x2a, vp.Width), ToNDC_Y(y2a, vp.Height), r, g, b, a,
+        // Triangle 2: bottom-left, bottom-right, top-right
+        ToNDC_X(x1b, vp.Width), ToNDC_Y(y1b, vp.Height), r, g, b, a,
+        ToNDC_X(x2b, vp.Width), ToNDC_Y(y2b, vp.Height), r, g, b, a,
+        ToNDC_X(x2a, vp.Width), ToNDC_Y(y2a, vp.Height), r, g, b, a
     };
 
     if (g_vb) g_vb->Release();
@@ -832,8 +881,8 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, 
 
     UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-    g_context->Draw(2, 0);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->Draw(6, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawPolygonNative(JNIEnv* env, jclass,
@@ -1079,10 +1128,16 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRoundRectNative(JNIE
     if (ah > h / 2.0f) ah = h / 2.0f;
 
     const int cornerSegments = 16;
-    const int totalVerts = cornerSegments * 4 + 4; // 4 corners + 4 straight line points
+    // 4 corners with arcs + 4 straight lines connecting them
+    const int maxVerts = cornerSegments * 4 + 8;
 
-    float* vertices = new float[totalVerts * 6];
+    float* vertices = new float[maxVerts * 6];
     int idx = 0;
+
+    // Helper to add a point
+    auto addPoint = [&](float px, float py) {
+        AddVertex(vertices, idx, ToNDC_X(px, vp.Width), ToNDC_Y(py, vp.Height), r, g, b, a);
+    };
 
     // Helper to add arc for a corner
     auto addCornerArc = [&](float cx, float cy, float startAngle, float endAngle) {
@@ -1091,21 +1146,29 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRoundRectNative(JNIE
             float angle = startAngle + t * (endAngle - startAngle);
             float px = cx + aw * cosf(angle);
             float py = cy + ah * sinf(angle);
-            AddVertex(vertices, idx, ToNDC_X(px, vp.Width), ToNDC_Y(py, vp.Height), r, g, b, a);
+            addPoint(px, py);
         }
     };
 
-    // Top-left corner (180 to 270 degrees in screen coords, but we use standard math)
+    // Top-left corner (180 to 270 degrees)
     addCornerArc(x + aw, y + ah, 3.14159265f, 3.14159265f * 1.5f);
+    // Top edge
+    addPoint(x + w - aw, y);
     // Top-right corner (270 to 360 degrees)
     addCornerArc(x + w - aw, y + ah, 3.14159265f * 1.5f, 3.14159265f * 2.0f);
+    // Right edge
+    addPoint(x + w, y + h - ah);
     // Bottom-right corner (0 to 90 degrees)
     addCornerArc(x + w - aw, y + h - ah, 0.0f, 3.14159265f * 0.5f);
+    // Bottom edge
+    addPoint(x + aw, y + h);
     // Bottom-left corner (90 to 180 degrees)
     addCornerArc(x + aw, y + h - ah, 3.14159265f * 0.5f, 3.14159265f);
+    // Left edge (back to start)
+    addPoint(x, y + ah);
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { idx * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { (UINT)(idx * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
@@ -1133,59 +1196,85 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRoundRectNative(JNIE
     if (ah > h / 2.0f) ah = h / 2.0f;
 
     const int cornerSegments = 16;
-    // For filled round rect: center point + 4 corners as triangle fans
-    // We'll use a triangle list approach: center + arc vertices for each corner
-    const int totalTriangles = cornerSegments * 4; // 4 corners
-    const int totalVerts = totalTriangles * 3;
+    // Triangles needed:
+    // - 4 corners: each has cornerSegments triangles = 4 * 16 = 64
+    // - Center rect: 2 triangles
+    // - 4 side bars: each 2 triangles = 8
+    // Total: 74 triangles = 222 vertices
+    const int maxTriangles = cornerSegments * 4 + 10;
 
-    float* vertices = new float[totalVerts * 6];
+    float* vertices = new float[maxTriangles * 3 * 6];
     int idx = 0;
 
-    float cx = x + w / 2.0f;
-    float cy = y + h / 2.0f;
-    float centerX = ToNDC_X(cx, vp.Width);
-    float centerY = ToNDC_Y(cy, vp.Height);
+    // Helper to add a triangle
+    auto addTri = [&](float x1, float y1, float x2, float y2, float x3, float y3) {
+        AddVertex(vertices, idx, ToNDC_X(x1, vp.Width), ToNDC_Y(y1, vp.Height), r, g, b, a);
+        AddVertex(vertices, idx, ToNDC_X(x2, vp.Width), ToNDC_Y(y2, vp.Height), r, g, b, a);
+        AddVertex(vertices, idx, ToNDC_X(x3, vp.Width), ToNDC_Y(y3, vp.Height), r, g, b, a);
+    };
 
-    // Helper to add a triangle fan for a corner
-    auto addCornerFan = [&](float cornerCX, float cornerCY, float startAngle, float endAngle) {
+    // Define key points
+    float left = x, right = x + w, top = y, bottom = y + h;
+    float innerLeft = x + aw, innerRight = x + w - aw;
+    float innerTop = y + ah, innerBottom = y + h - ah;
+
+    // Helper to add corner fan - fan goes from inner corner point to arc edge
+    // Each corner fan creates triangles from inner corner to arc segments
+    auto addCorner = [&](float centerX, float centerY, float startAngle, float endAngle,
+                         float innerCornerX, float innerCornerY) {
         for (int i = 0; i < cornerSegments; i++) {
             float t1 = (float)i / cornerSegments;
             float t2 = (float)(i + 1) / cornerSegments;
             float angle1 = startAngle + t1 * (endAngle - startAngle);
             float angle2 = startAngle + t2 * (endAngle - startAngle);
 
-            // Triangle: center -> arc point 1 -> arc point 2
-            AddVertex(vertices, idx, centerX, centerY, r, g, b, a);
-            AddVertex(vertices, idx, ToNDC_X(cornerCX + aw * cosf(angle1), vp.Width),
-                     ToNDC_Y(cornerCY + ah * sinf(angle1), vp.Height), r, g, b, a);
-            AddVertex(vertices, idx, ToNDC_X(cornerCX + aw * cosf(angle2), vp.Width),
-                     ToNDC_Y(cornerCY + ah * sinf(angle2), vp.Height), r, g, b, a);
+            // Arc points on the outer edge
+            float ax1 = centerX + aw * cosf(angle1);
+            float ay1 = centerY + ah * sinf(angle1);
+            float ax2 = centerX + aw * cosf(angle2);
+            float ay2 = centerY + ah * sinf(angle2);
+
+            // Triangle: inner corner point -> arc point 1 -> arc point 2
+            addTri(innerCornerX, innerCornerY, ax1, ay1, ax2, ay2);
         }
     };
 
-    // Add corner fans
-    addCornerFan(x + aw, y + ah, 3.14159265f, 3.14159265f * 1.5f); // Top-left
-    addCornerFan(x + w - aw, y + ah, 3.14159265f * 1.5f, 3.14159265f * 2.0f); // Top-right
-    addCornerFan(x + w - aw, y + h - ah, 0.0f, 3.14159265f * 0.5f); // Bottom-right
-    addCornerFan(x + aw, y + h - ah, 3.14159265f * 0.5f, 3.14159265f); // Bottom-left
+    // Top-left corner: center at (innerLeft, innerTop), arc from 180° to 270°
+    // Inner corner connects to (innerLeft, innerTop)
+    addCorner(innerLeft, innerTop, 3.14159265f, 3.14159265f * 1.5f, innerLeft, innerTop);
 
-    // Add center rectangle (2 triangles)
-    // This is a simplified approach - just the center cross region
-    float innerX1 = ToNDC_X(x + aw, vp.Width);
-    float innerX2 = ToNDC_X(x + w - aw, vp.Width);
-    float innerY1 = ToNDC_Y(y + ah, vp.Height);
-    float innerY2 = ToNDC_Y(y + h - ah, vp.Height);
+    // Top-right corner: center at (innerRight, innerTop), arc from 270° to 360°
+    addCorner(innerRight, innerTop, 3.14159265f * 1.5f, 3.14159265f * 2.0f, innerRight, innerTop);
 
-    // Center rect: 2 triangles
-    AddVertex(vertices, idx, innerX1, innerY1, r, g, b, a);
-    AddVertex(vertices, idx, innerX2, innerY1, r, g, b, a);
-    AddVertex(vertices, idx, innerX1, innerY2, r, g, b, a);
-    AddVertex(vertices, idx, innerX1, innerY2, r, g, b, a);
-    AddVertex(vertices, idx, innerX2, innerY1, r, g, b, a);
-    AddVertex(vertices, idx, innerX2, innerY2, r, g, b, a);
+    // Bottom-right corner: center at (innerRight, innerBottom), arc from 0° to 90°
+    addCorner(innerRight, innerBottom, 0.0f, 3.14159265f * 0.5f, innerRight, innerBottom);
+
+    // Bottom-left corner: center at (innerLeft, innerBottom), arc from 90° to 180°
+    addCorner(innerLeft, innerBottom, 3.14159265f * 0.5f, 3.14159265f, innerLeft, innerBottom);
+
+    // Center rectangle (the inner area without corners)
+    addTri(innerLeft, innerTop, innerRight, innerTop, innerLeft, innerBottom);
+    addTri(innerRight, innerTop, innerRight, innerBottom, innerLeft, innerBottom);
+
+    // Top bar: from left inner edge to right inner edge, from top to inner top
+    // Rectangle: (innerLeft, top) -> (innerRight, innerTop)
+    addTri(innerLeft, top, innerRight, top, innerLeft, innerTop);
+    addTri(innerRight, top, innerRight, innerTop, innerLeft, innerTop);
+
+    // Bottom bar: (innerLeft, innerBottom) -> (innerRight, bottom)
+    addTri(innerLeft, innerBottom, innerRight, innerBottom, innerLeft, bottom);
+    addTri(innerRight, innerBottom, innerRight, bottom, innerLeft, bottom);
+
+    // Left bar: (left, innerTop) -> (innerLeft, innerBottom)
+    addTri(left, innerTop, innerLeft, innerTop, left, innerBottom);
+    addTri(innerLeft, innerTop, innerLeft, innerBottom, left, innerBottom);
+
+    // Right bar: (innerRight, innerTop) -> (right, innerBottom)
+    addTri(innerRight, innerTop, right, innerTop, innerRight, innerBottom);
+    addTri(right, innerTop, right, innerBottom, innerRight, innerBottom);
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { idx * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { (UINT)(idx * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
@@ -1216,6 +1305,10 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_resetTransformNative(JNI
     g_scaleX = 1.0f;
     g_scaleY = 1.0f;
     g_rotation = 0.0f;
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setUIScaleNative(JNIEnv*, jclass, jfloat scale) {
+    g_uiScale = scale;
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setStrokeNative(JNIEnv*, jclass, jfloat lineWidth) {
