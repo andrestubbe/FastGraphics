@@ -1,6 +1,6 @@
 # FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
 
-> **� MAJOR UPDATE** - `drawImage()` now fully implemented with GPU texture caching! See [TODO.md](TODO.md) for remaining features.
+> **🎨 MAJOR UPDATE** - Alpha Transparency & Rounded Rectangles now fully implemented! See [TODO.md](TODO.md) for remaining features.
 
 **⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
 
@@ -19,6 +19,14 @@ g.fillRect(10, 10, 100, 50);
 g.setColor(Color.BLUE);
 g.fillOval(200, 100, 30, 30);
 g.present();  // 1 Draw Call für alles!
+
+// NEW: Alpha transparency support!
+g.setColor(new Color(255, 0, 0, 128)); // 50% transparent red
+g.fillOval(100, 100, 200, 200);
+
+// NEW: Rounded rectangles!
+g.setColor(new Color(0, 200, 255));
+g.fillRoundRect(300, 200, 150, 100, 20, 20);
 ```
 
 FastGraphics is a **high-performance GPU-accelerated 2D rendering library** that replaces `java.awt.Graphics2D` with a **native DirectX 11 backend**. Built for **real-time games**, **data visualization**, **scientific applications**, and **high-frequency UI rendering** where Java2D performance bottlenecks.
@@ -158,8 +166,8 @@ java -cp out demo.Comparator
 | `fillPolygon(xPoints, yPoints)` | Fill polygon (convex) | ✅ Implemented |
 | `drawArc(x, y, w, h, startAngle, arcAngle)` | Draw arc | ✅ Implemented |
 | `fillArc(x, y, w, h, startAngle, arcAngle)` | Fill arc | ✅ Implemented |
-| `drawRoundRect(x, y, w, h, arcWidth, arcHeight)` | Draw rounded rectangle | ⚠️ Stub (draws as rect) |
-| `fillRoundRect(x, y, w, h, arcWidth, arcHeight)` | Fill rounded rectangle | ⚠️ Stub (fills as rect) |
+| `drawRoundRect(x, y, w, h, arcWidth, arcHeight)` | Draw rounded rectangle | ✅ Implemented |
+| `fillRoundRect(x, y, w, h, arcWidth, arcHeight)` | Fill rounded rectangle | ✅ Implemented |
 | `translate(tx, ty)` | Translate coordinate system | ✅ Implemented |
 | `scale(sx, sy)` | Scale coordinate system | ✅ Implemented |
 | `rotate(angle)` | Rotate coordinate system | ✅ Implemented |
@@ -181,7 +189,7 @@ java -cp out demo.Comparator
 - **Line Width**: setStroke() stores line width but doesn't apply it to rendering
 - **Text Rendering**: drawString() is a stub (requires textured shaders and font rendering)
 - **Image Rendering**: drawImage() is fully implemented with GPU texture caching
-- **Rounded Rectangles**: drawRoundRect()/fillRoundRect() are stubs (complex geometry causes crashes)
+- **Alpha Transparency**: Now fully supported! Use `new Color(r, g, b, alpha)` for transparent shapes
 
 ### State Management
 

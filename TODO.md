@@ -5,19 +5,19 @@ This document tracks remaining features needed to make FastGraphics a complete G
 ## Priority: High - Core Graphics2D Features
 
 ### Alpha Compositing & Transparency
-- [ ] Implement `setComposite(Composite comp)` method
-  - [ ] Support `AlphaComposite` for transparency blending
-  - [ ] Implement blend modes (SRC_OVER, SRC_IN, DST_OVER, etc.)
-  - [ ] Add alpha channel support to vertex shader
-  - [ ] Enable blending in DirectX 11 (D3D11_BLEND_DESC)
-  - [ ] Test transparency with overlapping shapes
+- [x] Implement `setComposite(Composite comp)` method
+  - [x] Support `AlphaComposite` for transparency blending
+  - [x] Implement blend modes (SRC_OVER, SRC_IN, DST_OVER, etc.)
+  - [x] Add alpha channel support to vertex shader
+  - [x] Enable blending in DirectX 11 (D3D11_BLEND_DESC)
+  - [x] Test transparency with overlapping shapes
 
 ### Color with Alpha
-- [ ] Extend `setColor(Color c)` to handle alpha channel
-  - [ ] Pass alpha from Color to native layer
-  - [ ] Store alpha in vertex data
-  - [ ] Update shader to use alpha in output
-  - [ ] Test semi-transparent shapes
+- [x] Extend `setColor(Color c)` to handle alpha channel
+  - [x] Pass alpha from Color to native layer
+  - [x] Store alpha in vertex data
+  - [x] Update shader to use alpha in output
+  - [x] Test semi-transparent shapes
 
 ### Text Rendering
 - [ ] Implement `drawString(String str, float x, float y)` properly
@@ -61,11 +61,11 @@ This document tracks remaining features needed to make FastGraphics a complete G
   - [ ] Document anti-aliasing limitations and workarounds
 
 ### Rounded Rectangles
-- [ ] Implement proper `drawRoundRect()` and `fillRoundRect()`
-  - [ ] Fix geometry generation for rounded corners
-  - [ ] Implement arc segments for corners
-  - [ ] Handle edge cases (arc width/height > dimensions)
-  - [ ] Test with various arc sizes
+- [x] Implement proper `drawRoundRect()` and `fillRoundRect()`
+  - [x] Fix geometry generation for rounded corners
+  - [x] Implement arc segments for corners
+  - [x] Handle edge cases (arc width/height > dimensions)
+  - [x] Test with various arc sizes
 
 ## Priority: Low - Additional Graphics2D Features
 
