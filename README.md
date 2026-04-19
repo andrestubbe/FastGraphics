@@ -177,8 +177,8 @@ java -cp out demo.Comparator
 | `setStroke(float lineWidth)` | Set line width for drawing | ✅ Implemented |
 | `setRenderingHint(key, value)` | Set rendering hint | ⚠️ Stub (stores only) |
 | `getRenderingHint(key)` | Get rendering hint | ✅ Implemented |
-| `setClip(x, y, w, h)` | Set clipping rectangle | ⚠️ Stub (stores only) |
-| `resetClip()` | Reset clipping | ⚠️ Stub (stores only) |
+| `setClip(x, y, w, h)` | Set clipping rectangle | ✅ Implemented (Scissor Rects) |
+| `resetClip()` | Reset clipping | ✅ Implemented |
 | `drawString(str, x, y)` | Draw text string | ⚠️ Stub (no effect) |
 | `drawImage(img, x, y, w, h)` | Draw image (GPU-accelerated with caching) | ✅ Implemented |
 | `clear()` / `clear(Color c)` | Clear background | ✅ Implemented |
@@ -187,7 +187,7 @@ java -cp out demo.Comparator
 ### Known Limitations
 
 - **AntiAliasing**: RenderingHints.KEY_ANTIALIASING is supported via API, but DirectX 11 MSAA requires Swap Chain configuration (not runtime-switchable)
-- **Clipping**: setClip()/resetClip() store values but don't apply clipping (requires Scissor Rects or Stencil Buffer)
+- **Clipping**: ✅ Fully implemented via DirectX 11 Scissor Rects
 - **Line Width**: ✅ Now implemented! Use `setStroke(width)` for thick lines
 - **Text Rendering**: drawString() is a stub (requires textured shaders and font rendering)
 - **Image Rendering**: drawImage() is fully implemented with GPU texture caching
@@ -213,6 +213,23 @@ g.present();  // All batches rendered in 1-2 draw calls
 
 ---
 
+## Examples
+
+All runnable demos are in `examples/` folder:
+
+```bash
+cd examples/00-basic-usage && mvn compile exec:java        # Main demo
+cd examples/10-clipping && mvn compile exec:java           # Clipping tests  
+cd examples/20-benchmark && mvn compile exec:java          # Performance test
+cd examples/30-shapes && mvn compile exec:java             # Shape rendering
+cd examples/40-advanced && mvn compile exec:java           # Transforms, transparency
+cd examples/50-image && mvn compile exec:java              # Image rendering
+cd examples/60-comparison && mvn compile exec:java         # FastGraphics vs Java2D
+cd examples/70-simple && mvn compile exec:java             # Simple tests
+```
+
+---
+
 ## Build from Source
 
 ### Prerequisites
@@ -220,22 +237,36 @@ g.present();  // All batches rendered in 1-2 draw calls
 - Java JDK 17+
 - Visual Studio 2022 (C++ workload)
 
-### Build
-```powershell
-# PowerShell
-.\build.ps1
+### Quick Start (Maven)
 
-# Or manual:
-javac -d out src\fastgraphics\*.java src\demo\*.java
-cl /O2 /EHsc /LD /Fe:out\FastGraphics.dll native\FastGraphics.cpp \
-    /I"%JAVA_HOME%\include" /I"%JAVA_HOME%\include\win32" \
-    d3d11.lib d3dcompiler.lib user32.lib
+```xml
+<dependency>
+    <groupId>com.github.andrestubbe</groupId>
+    <artifactId>FastGraphics</artifactId>
+    <version>v1.0.0-beta</version>
+</dependency>
 ```
 
-### Run
+Or download JAR: https://jitpack.io/com/github/andrestubbe/FastGraphics/v1.0.0-beta/FastGraphics-v1.0.0-beta.jar
+
+### Build from Source
+
 ```bash
-cd out
-java -cp . -Djava.library.path=. demo.DemoApp
+# Build library
+mvn clean package
+
+# Run examples
+cd examples/00-basic-usage
+mvn compile exec:java
+```
+
+### Build Native DLL (Windows)
+
+```powershell
+# Requires Visual Studio 2022 with C++ workload
+cl /O2 /EHsc /LD /Fe:out\FastGraphics.dll native\FastGraphics.cpp `
+    /I"%JAVA_HOME%\include" /I"%JAVA_HOME%\include\win32" `
+    d3d11.lib d3dcompiler.lib user32.lib
 ```
 
 ---

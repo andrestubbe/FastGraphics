@@ -7,7 +7,7 @@
 
     <groupId>io.github.andrestubbe</groupId>
     <artifactId>fastgraphics</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.0-beta</version>
     <packaging>jar</packaging>
 
     <name>FastGraphics</name>
@@ -31,9 +31,8 @@
     <developers>
         <developer>
             <name>FastJava Team</name>
-            <email>info@fastjava.dev</email>
-            <organization>FastJava</organization>
-            <organizationUrl>https://fastjava.dev</organizationUrl>
+                        <organization>FastJava</organization>
+            <organizationUrl>https://github.com/andrestubbe</organizationUrl>
         </developer>
     </developers>
 

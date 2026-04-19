@@ -1,0 +1,63 @@
+# IDE Settings
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Build Output
+out/
+target/
+build/
+bin/
+
+# Native Build Artifacts
+*.obj
+*.lib
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.manifest
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+*.class
+
+# Logs
+*.log
+demo.log
+
+# OS Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Maven
+dependency-reduced-pom.xml
+
+# Native build outputs
+FastGraphics.dll
+FastGraphics.lib
+FastGraphics.exp
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Release files (local only)
+RELEASE.txt
+RELEASEV*.md
+
+# TODO files (local only)
+TODO.md

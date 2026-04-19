@@ -173,6 +173,10 @@ static float g_clipW = 0.0f;
 static float g_clipH = 0.0f;
 static bool g_clipEnabled = false;
 
+// Cached rasterizer states for clipping
+static ID3D11RasterizerState* g_rsScissorEnabled = nullptr;
+static ID3D11RasterizerState* g_rsScissorDisabled = nullptr;
+
 // Apply transformation to point
 static void ApplyTransform(float* x, float* y) {
     *x *= g_scaleX;
@@ -190,6 +194,20 @@ static void ApplyTransform(float* x, float* y) {
     
     *x += g_translateX;
     *y += g_translateY;
+}
+
+// Apply current clipping state before drawing
+static void ApplyClipState() {
+    printf("[ApplyClipState] g_clipEnabled=%s, g_rsScissorEnabled=%p, g_rsScissorDisabled=%p\n", 
+           g_clipEnabled ? "TRUE" : "FALSE",
+           g_rsScissorEnabled, g_rsScissorDisabled);
+    if (g_clipEnabled && g_rsScissorEnabled) {
+        g_context->RSSetState(g_rsScissorEnabled);
+        printf("[Clip] ENABLED, scissor state set\n");
+    } else if (!g_clipEnabled && g_rsScissorDisabled) {
+        g_context->RSSetState(g_rsScissorDisabled);
+        printf("[Clip] DISABLED\n");
+    }
 }
 
 extern "C" {
@@ -263,6 +281,29 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
     vp.TopLeftY = 0;
     g_context->RSSetViewports(1, &vp);
     fprintf(stderr, "[FastGraphics] DemoApp_init: viewport set OK\n");
+    
+    // Create cached rasterizer states for clipping
+    fprintf(stderr, "[FastGraphics] DemoApp_init: creating rasterizer states...\n");
+    D3D11_RASTERIZER_DESC rsDesc = {};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_BACK;
+    rsDesc.FrontCounterClockwise = TRUE;
+    rsDesc.DepthClipEnable = TRUE;
+    rsDesc.ScissorEnable = FALSE;
+    
+    // Create default state (scissor disabled)
+    g_device->CreateRasterizerState(&rsDesc, &g_rsScissorDisabled);
+    if (g_rsScissorDisabled) {
+        g_context->RSSetState(g_rsScissorDisabled);
+        fprintf(stderr, "[FastGraphics] DemoApp_init: default rasterizer state created\n");
+    }
+    
+    // Create scissor-enabled state
+    rsDesc.ScissorEnable = TRUE;
+    g_device->CreateRasterizerState(&rsDesc, &g_rsScissorEnabled);
+    if (g_rsScissorEnabled) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: scissor rasterizer state created\n");
+    }
     
     fprintf(stderr, "[FastGraphics] DemoApp_init: compiling shaders...\n");
     ID3D10Blob* vsBlob = nullptr, * psBlob = nullptr;
@@ -386,6 +427,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_renderBatch(JNIEnv* env,
     g_context->IASetInputLayout(g_layout);
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
+    
+    // Apply clipping state
+    ApplyClipState();
     
     // Set vertex buffer
     UINT stride = 6 * sizeof(float);
@@ -664,7 +708,16 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRectNative(JNIEnv*, 
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
+    static int callCount = 0;
+    callCount++;
+    if (callCount <= 5) {
+        printf("[fillRect] #%d: (%.0f,%.0f,%.0f,%.0f) color(%.2f,%.2f,%.2f)\n", callCount, x, y, width, height, r, g, b);
+    }
+    
+    if (!g_device) {
+        printf("[fillRect] ERROR: g_device is null!\n");
+        return;
+    }
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
     g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
@@ -672,6 +725,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     // Apply transformation to corners
     float corners[] = { x, y, x + width, y, x, y + height, x + width, y + height };
@@ -714,6 +770,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -775,6 +834,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawOvalNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -819,6 +881,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     // Calculate perpendicular offset for thick lines
     float dx = x2 - x1;
@@ -895,6 +960,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawPolygonNative(JNIEnv
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     jfloat* xArr = env->GetFloatArrayElements(xPoints, nullptr);
     jfloat* yArr = env->GetFloatArrayElements(yPoints, nullptr);
@@ -943,6 +1011,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillPolygonNative(JNIEnv
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     jfloat* xArr = env->GetFloatArrayElements(xPoints, nullptr);
     jfloat* yArr = env->GetFloatArrayElements(yPoints, nullptr);
@@ -1001,6 +1072,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawArcNative(JNIEnv*, j
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -1048,6 +1122,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillArcNative(JNIEnv*, j
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -1120,6 +1197,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRoundRectNative(JNIE
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     // Clamp arc dimensions
     float aw = arcWidth / 2.0f;
@@ -1188,6 +1268,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRoundRectNative(JNIE
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     // Clamp arc dimensions
     float aw = arcWidth / 2.0f;
@@ -1320,16 +1403,68 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setAntiAliasingNative(JN
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setClipNative(JNIEnv*, jclass, jfloat x, jfloat y, jfloat w, jfloat h) {
-    // Stub: clipping not supported (requires scissor rects or stencil buffer)
-    g_clipX = x;
-    g_clipY = y;
-    g_clipW = w;
-    g_clipH = h;
+    printf("[setClipNative] CALLED with (%.0f, %.0f, %.0f, %.0f)\n", x, y, w, h);
+    fflush(stdout);
+    
+    if (!g_context) {
+        printf("[setClipNative] ERROR: g_context is null!\n");
+        return;
+    }
+
+    // Store clip values for reference
+    g_clipX = x; g_clipY = y; g_clipW = w; g_clipH = h;
     g_clipEnabled = true;
+    printf("[setClipNative] g_clipEnabled set to TRUE\n");
+
+    // Get viewport to calculate proper scissor rect in pixels
+    D3D11_VIEWPORT vp;
+    UINT num = 1;
+    g_context->RSGetViewports(&num, &vp);
+
+    // Convert from screen coordinates to pixel coordinates
+    // DirectX scissor rects are in pixel coordinates (top-left origin, Y goes down)
+    // Our screen coords have Y from top-left, so we just scale by UI scale
+    long left = (long)(x * g_uiScale);
+    long top = (long)(y * g_uiScale);
+    long right = (long)((x + w) * g_uiScale);
+    long bottom = (long)((y + h) * g_uiScale);
+
+    // Clamp to viewport bounds
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > (long)vp.Width) right = (long)vp.Width;
+    if (bottom > (long)vp.Height) bottom = (long)vp.Height;
+
+    // Set scissor rect (in pixel coordinates)
+    D3D11_RECT scissorRect = { left, top, right, bottom };
+    g_context->RSSetScissorRects(1, &scissorRect);
+
+    // Enable scissor test using cached rasterizer state
+    if (g_rsScissorEnabled) {
+        g_context->RSSetState(g_rsScissorEnabled);
+    }
+    
+    printf("[setClip] uiScale=%.2f, screen(%.0f,%.0f,%.0f,%.0f) -> pixels(%ld,%ld,%ld,%ld), vp(%.0f,%.0f)\n",
+           g_uiScale, x, y, w, h, left, top, right, bottom, vp.Width, vp.Height);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_resetClipNative(JNIEnv*, jclass) {
+    if (!g_context) return;
+
     g_clipEnabled = false;
+
+    // Reset scissor rect to full viewport
+    D3D11_VIEWPORT vp;
+    UINT num = 1;
+    g_context->RSGetViewports(&num, &vp);
+
+    D3D11_RECT scissorRect = { 0, 0, (long)vp.Width, (long)vp.Height };
+    g_context->RSSetScissorRects(1, &scissorRect);
+
+    // Disable scissor test using cached rasterizer state
+    if (g_rsScissorDisabled) {
+        g_context->RSSetState(g_rsScissorDisabled);
+    }
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawStringNative(JNIEnv* env, jclass, jstring str, jfloat x, jfloat y, jfloat r, jfloat g, jfloat b, jfloat a) {
