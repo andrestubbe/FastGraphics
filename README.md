@@ -1,6 +1,6 @@
 # FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
 
-> **� MAJOR UPDATE** - `drawImage()` now fully implemented with GPU texture caching! See [TODO.md](TODO.md) for remaining features.
+> **🎨 MAJOR UPDATE** - Alpha Transparency & Rounded Rectangles now fully implemented! See [TODO.md](TODO.md) for remaining features.
 
 **⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
 
@@ -9,7 +9,8 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png)
+<!-- TODO: Add benchmark image here when available -->
+<!-- ![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png) -->
 
 ```java
 // Quick Start — Ultra-fast 2D rendering
@@ -19,6 +20,14 @@ g.fillRect(10, 10, 100, 50);
 g.setColor(Color.BLUE);
 g.fillOval(200, 100, 30, 30);
 g.present();  // 1 Draw Call für alles!
+
+// NEW: Alpha transparency support!
+g.setColor(new Color(255, 0, 0, 128)); // 50% transparent red
+g.fillOval(100, 100, 200, 200);
+
+// NEW: Rounded rectangles!
+g.setColor(new Color(0, 200, 255));
+g.fillRoundRect(300, 200, 150, 100, 20, 20);
 ```
 
 FastGraphics is a **high-performance GPU-accelerated 2D rendering library** that replaces `java.awt.Graphics2D` with a **native DirectX 11 backend**. Built for **real-time games**, **data visualization**, **scientific applications**, and **high-frequency UI rendering** where Java2D performance bottlenecks.
@@ -126,9 +135,10 @@ public class QuickStart {
 
 FastGraphics includes a classic **80s TV Test Pattern** demo for visual validation:
 
-![TV Test Pattern Comparison](docs/tv-test-pattern.png)
+<!-- TODO: Add TV test pattern image here when available -->
+<!-- ![TV Test Pattern Comparison](docs/tv-test-pattern.png) -->
 
-The test renders identical patterns in both FastGraphics (left) and Java2D (right) for pixel-perfect comparison. This validates:
+The test renders identical patterns in both FastGraphics and Java2D for pixel-perfect comparison. This validates:
 - ✅ Color accuracy (Color Bars)
 - ✅ Geometric precision (Convergence Circles)
 - ✅ Gradient rendering (Shade Bars)
@@ -158,17 +168,17 @@ java -cp out demo.Comparator
 | `fillPolygon(xPoints, yPoints)` | Fill polygon (convex) | ✅ Implemented |
 | `drawArc(x, y, w, h, startAngle, arcAngle)` | Draw arc | ✅ Implemented |
 | `fillArc(x, y, w, h, startAngle, arcAngle)` | Fill arc | ✅ Implemented |
-| `drawRoundRect(x, y, w, h, arcWidth, arcHeight)` | Draw rounded rectangle | ⚠️ Stub (draws as rect) |
-| `fillRoundRect(x, y, w, h, arcWidth, arcHeight)` | Fill rounded rectangle | ⚠️ Stub (fills as rect) |
+| `drawRoundRect(x, y, w, h, arcWidth, arcHeight)` | Draw rounded rectangle | ✅ Implemented |
+| `fillRoundRect(x, y, w, h, arcWidth, arcHeight)` | Fill rounded rectangle | ✅ Implemented |
 | `translate(tx, ty)` | Translate coordinate system | ✅ Implemented |
 | `scale(sx, sy)` | Scale coordinate system | ✅ Implemented |
 | `rotate(angle)` | Rotate coordinate system | ✅ Implemented |
 | `resetTransform()` | Reset transformations | ✅ Implemented |
-| `setStroke(Stroke s)` | Set line stroke | ⚠️ Stub (stores only) |
+| `setStroke(float lineWidth)` | Set line width for drawing | ✅ Implemented |
 | `setRenderingHint(key, value)` | Set rendering hint | ⚠️ Stub (stores only) |
 | `getRenderingHint(key)` | Get rendering hint | ✅ Implemented |
-| `setClip(x, y, w, h)` | Set clipping rectangle | ⚠️ Stub (stores only) |
-| `resetClip()` | Reset clipping | ⚠️ Stub (stores only) |
+| `setClip(x, y, w, h)` | Set clipping rectangle | ✅ Implemented (Scissor Rects) |
+| `resetClip()` | Reset clipping | ✅ Implemented |
 | `drawString(str, x, y)` | Draw text string | ⚠️ Stub (no effect) |
 | `drawImage(img, x, y, w, h)` | Draw image (GPU-accelerated with caching) | ✅ Implemented |
 | `clear()` / `clear(Color c)` | Clear background | ✅ Implemented |
@@ -177,11 +187,11 @@ java -cp out demo.Comparator
 ### Known Limitations
 
 - **AntiAliasing**: RenderingHints.KEY_ANTIALIASING is supported via API, but DirectX 11 MSAA requires Swap Chain configuration (not runtime-switchable)
-- **Clipping**: setClip()/resetClip() store values but don't apply clipping (requires Scissor Rects or Stencil Buffer)
-- **Line Width**: setStroke() stores line width but doesn't apply it to rendering
+- **Clipping**: ✅ Fully implemented via DirectX 11 Scissor Rects
+- **Line Width**: ✅ Now implemented! Use `setStroke(width)` for thick lines
 - **Text Rendering**: drawString() is a stub (requires textured shaders and font rendering)
 - **Image Rendering**: drawImage() is fully implemented with GPU texture caching
-- **Rounded Rectangles**: drawRoundRect()/fillRoundRect() are stubs (complex geometry causes crashes)
+- **Alpha Transparency**: Now fully supported! Use `new Color(r, g, b, alpha)` for transparent shapes
 
 ### State Management
 
@@ -203,30 +213,26 @@ g.present();  // All batches rendered in 1-2 draw calls
 
 ---
 
+## Examples
+
+All runnable demos are in `examples/` folder:
+
+```bash
+cd examples/00-basic-usage && mvn compile exec:java        # Main demo
+cd examples/10-clipping && mvn compile exec:java           # Clipping tests  
+cd examples/20-benchmark && mvn compile exec:java          # Performance test
+cd examples/30-shapes && mvn compile exec:java             # Shape rendering
+cd examples/40-advanced && mvn compile exec:java           # Transforms, transparency
+cd examples/50-image && mvn compile exec:java              # Image rendering
+cd examples/60-comparison && mvn compile exec:java         # FastGraphics vs Java2D
+cd examples/70-simple && mvn compile exec:java             # Simple tests
+```
+
+---
+
 ## Build from Source
 
-### Prerequisites
-- Windows 10/11
-- Java JDK 17+
-- Visual Studio 2022 (C++ workload)
-
-### Build
-```powershell
-# PowerShell
-.\build.ps1
-
-# Or manual:
-javac -d out src\fastgraphics\*.java src\demo\*.java
-cl /O2 /EHsc /LD /Fe:out\FastGraphics.dll native\FastGraphics.cpp \
-    /I"%JAVA_HOME%\include" /I"%JAVA_HOME%\include\win32" \
-    d3d11.lib d3dcompiler.lib user32.lib
-```
-
-### Run
-```bash
-cd out
-java -cp . -Djava.library.path=. demo.DemoApp
-```
+See [COMPILE.md](COMPILE.md) for detailed build instructions.
 
 ---
 

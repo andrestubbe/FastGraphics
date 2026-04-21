@@ -7,7 +7,7 @@
 
     <groupId>io.github.andrestubbe</groupId>
     <artifactId>fastgraphics</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.0-beta</version>
     <packaging>jar</packaging>
 
     <name>FastGraphics</name>

@@ -38,15 +38,15 @@ struct TextureEntry {
 static std::map<int, TextureEntry> g_textureCache;
 static int g_nextTextureId = 1;
 
-// Standard vertex shader
+// Standard vertex shader with alpha
 const char* VS_SRC = R"(
     struct VS_INPUT {
         float2 pos : POSITION;
-        float3 color : COLOR;
+        float4 color : COLOR;
     };
     struct VS_OUTPUT {
         float4 pos : SV_POSITION;
-        float3 color : COLOR;
+        float4 color : COLOR;
     };
     VS_OUTPUT main(VS_INPUT input) {
         VS_OUTPUT output;
@@ -56,7 +56,7 @@ const char* VS_SRC = R"(
     }
 )";
 
-// Instanced vertex shader with pixel-perfect coordinates
+// Instanced vertex shader with pixel-perfect coordinates and alpha
 const char* VS_INSTANCED_SRC = R"(
     struct VS_INPUT {
         float2 quadPos : POSITION;
@@ -64,11 +64,11 @@ const char* VS_INSTANCED_SRC = R"(
     struct VS_INSTANCE {
         float2 pos : INSTANCE_POS;
         float2 size : INSTANCE_SIZE;
-        float3 color : INSTANCE_COLOR;
+        float4 color : INSTANCE_COLOR;
     };
     struct VS_OUTPUT {
         float4 pos : SV_POSITION;
-        float3 color : COLOR;
+        float4 color : COLOR;
     };
     cbuffer ScreenCB : register(b0) {
         float2 screenSize;
@@ -97,10 +97,10 @@ const char* VS_INSTANCED_SRC = R"(
 const char* PS_SRC = R"(
     struct PS_INPUT {
         float4 pos : SV_POSITION;
-        float3 color : COLOR;
+        float4 color : COLOR;
     };
     float4 main(PS_INPUT input) : SV_TARGET {
-        return float4(input.color, 1.0);
+        return input.color;
     }
 )";
 
@@ -150,8 +150,11 @@ bool CompileShader(const char* src, const char* entry, const char* target, ID3DB
     return true;
 }
 
-float ToNDC_X(float x, float w) { return (x / w) * 2.0f - 1.0f; }
-float ToNDC_Y(float y, float h) { return 1.0f - (y / h) * 2.0f; }
+// UI Scale for High DPI displays (1.0 = 100%, 2.0 = 200%)
+static float g_uiScale = 1.0f;
+
+float ToNDC_X(float x, float w) { return ((x * g_uiScale) / w) * 2.0f - 1.0f; }
+float ToNDC_Y(float y, float h) { return 1.0f - ((y * g_uiScale) / h) * 2.0f; }
 
 // Transformation state
 static float g_translateX = 0.0f;
@@ -170,6 +173,10 @@ static float g_clipW = 0.0f;
 static float g_clipH = 0.0f;
 static bool g_clipEnabled = false;
 
+// Cached rasterizer states for clipping
+static ID3D11RasterizerState* g_rsScissorEnabled = nullptr;
+static ID3D11RasterizerState* g_rsScissorDisabled = nullptr;
+
 // Apply transformation to point
 static void ApplyTransform(float* x, float* y) {
     *x *= g_scaleX;
@@ -187,6 +194,20 @@ static void ApplyTransform(float* x, float* y) {
     
     *x += g_translateX;
     *y += g_translateY;
+}
+
+// Apply current clipping state before drawing
+static void ApplyClipState() {
+    printf("[ApplyClipState] g_clipEnabled=%s, g_rsScissorEnabled=%p, g_rsScissorDisabled=%p\n", 
+           g_clipEnabled ? "TRUE" : "FALSE",
+           g_rsScissorEnabled, g_rsScissorDisabled);
+    if (g_clipEnabled && g_rsScissorEnabled) {
+        g_context->RSSetState(g_rsScissorEnabled);
+        printf("[Clip] ENABLED, scissor state set\n");
+    } else if (!g_clipEnabled && g_rsScissorDisabled) {
+        g_context->RSSetState(g_rsScissorDisabled);
+        printf("[Clip] DISABLED\n");
+    }
 }
 
 extern "C" {
@@ -261,6 +282,29 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
     g_context->RSSetViewports(1, &vp);
     fprintf(stderr, "[FastGraphics] DemoApp_init: viewport set OK\n");
     
+    // Create cached rasterizer states for clipping
+    fprintf(stderr, "[FastGraphics] DemoApp_init: creating rasterizer states...\n");
+    D3D11_RASTERIZER_DESC rsDesc = {};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_BACK;
+    rsDesc.FrontCounterClockwise = TRUE;
+    rsDesc.DepthClipEnable = TRUE;
+    rsDesc.ScissorEnable = FALSE;
+    
+    // Create default state (scissor disabled)
+    g_device->CreateRasterizerState(&rsDesc, &g_rsScissorDisabled);
+    if (g_rsScissorDisabled) {
+        g_context->RSSetState(g_rsScissorDisabled);
+        fprintf(stderr, "[FastGraphics] DemoApp_init: default rasterizer state created\n");
+    }
+    
+    // Create scissor-enabled state
+    rsDesc.ScissorEnable = TRUE;
+    g_device->CreateRasterizerState(&rsDesc, &g_rsScissorEnabled);
+    if (g_rsScissorEnabled) {
+        fprintf(stderr, "[FastGraphics] DemoApp_init: scissor rasterizer state created\n");
+    }
+    
     fprintf(stderr, "[FastGraphics] DemoApp_init: compiling shaders...\n");
     ID3D10Blob* vsBlob = nullptr, * psBlob = nullptr;
     if (!CompileShader(VS_SRC, "main", "vs_4_0", &vsBlob)) {
@@ -277,12 +321,29 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
     g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs);
     g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps);
     
-    // Input layout for standard shader (position + color)
+    // Input layout for standard shader (position + color with alpha)
     D3D11_INPUT_ELEMENT_DESC ied[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 }
     };
     g_device->CreateInputLayout(ied, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layout);
+    
+    // Enable alpha blending
+    D3D11_BLEND_DESC blendDesc = {};
+    blendDesc.RenderTarget[0].BlendEnable = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ID3D11BlendState* blendState = nullptr;
+    g_device->CreateBlendState(&blendDesc, &blendState);
+    if (blendState) {
+        g_context->OMSetBlendState(blendState, nullptr, 0xFFFFFFFF);
+        blendState->Release();
+    }
     
     vsBlob->Release();
     psBlob->Release();
@@ -310,12 +371,12 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_fillRect(JNIEnv*, jclass,
     float x2 = ToNDC_X(x + width, vp.Width), y2 = ToNDC_Y(y + height, vp.Height);
     
     float vertices[] = {
-        x1, y1, r, g, b,
-        x2, y1, r, g, b,
-        x1, y2, r, g, b,
-        x1, y2, r, g, b,
-        x2, y1, r, g, b,
-        x2, y2, r, g, b
+        x1, y1, r, g, b, 1.0f,
+        x2, y1, r, g, b, 1.0f,
+        x1, y2, r, g, b, 1.0f,
+        x1, y2, r, g, b, 1.0f,
+        x2, y1, r, g, b, 1.0f,
+        x2, y2, r, g, b, 1.0f
     };
     
     if (g_vb) g_vb->Release();
@@ -323,7 +384,7 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_fillRect(JNIEnv*, jclass,
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->Draw(6, 0);
@@ -354,7 +415,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_renderBatch(JNIEnv* env,
     // Create/update vertex buffer
     if (g_vb) g_vb->Release();
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = count * 5 * sizeof(float); // count vertices * 5 floats (x,y,r,g,b)
+    bd.ByteWidth = count * 6 * sizeof(float); // count vertices * 6 floats (x,y,r,g,b,a)
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     D3D11_SUBRESOURCE_DATA sd = { verts };
@@ -367,8 +428,11 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_renderBatch(JNIEnv* env,
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     
+    // Apply clipping state
+    ApplyClipState();
+    
     // Set vertex buffer
-    UINT stride = 5 * sizeof(float);
+    UINT stride = 6 * sizeof(float);
     UINT offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -402,8 +466,8 @@ static ID3D11VertexShader* g_vsInstanced = nullptr;
 static ID3D11InputLayout* g_layoutInstanced = nullptr;
 static size_t g_instanceVBSize = 0;
 
-// Instance data: x, y, w, h, r, g, b (7 floats)
-static float g_instanceData[MAX_BATCH_RECTS * 7];
+// Instance data: x, y, w, h, r, g, b, a (8 floats)
+static float g_instanceData[MAX_BATCH_RECTS * 8];
 
 // Static quad (0,0 to 1,1)
 static float g_quadVertices[] = {
@@ -444,12 +508,12 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_fillRects(JNIEnv* env, jclass,
         if (CompileShader(VS_INSTANCED_SRC, "main", "vs_4_0", &vsBlob)) {
             g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vsInstanced);
             
-            // Input layout for instanced rendering
+            // Input layout for instanced rendering with alpha
             D3D11_INPUT_ELEMENT_DESC layout[] = {
                 { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
                 { "INSTANCE_POS", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
                 { "INSTANCE_SIZE", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 8, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
-                { "INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 }
+                { "INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 }
             };
             g_device->CreateInputLayout(layout, 4, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layoutInstanced);
             vsBlob->Release();
@@ -464,8 +528,8 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_fillRects(JNIEnv* env, jclass,
         g_device->CreateBuffer(&cbd, nullptr, &g_screenCB);
     }
     
-    // Prepare instance data
-    size_t instanceDataSize = count * 7 * sizeof(float);
+    // Prepare instance data (8 floats per instance: x, y, w, h, r, g, b, a)
+    size_t instanceDataSize = count * 8 * sizeof(float);
     memcpy(g_instanceData, rects, instanceDataSize);
     
     // Persistent instance buffer
@@ -503,9 +567,9 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_fillRects(JNIEnv* env, jclass,
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layoutInstanced);
     
-    // Bind vertex buffers
+    // Bind vertex buffers (stride 8 for quad pos, 32 for instance data: 8 floats * 4 bytes)
     ID3D11Buffer* buffers[] = { g_quadVB, g_instanceVB };
-    UINT strides[] = { 8, 28 };
+    UINT strides[] = { 8, 32 };
     UINT offsets[] = { 0, 0 };
     g_context->IASetVertexBuffers(0, 2, buffers, strides, offsets);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -610,7 +674,7 @@ JNIEXPORT jlong JNICALL Java_fastgraphics_FastGraphics2D_findWindowNative(JNIEnv
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b) {
+    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -624,11 +688,11 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRectNative(JNIEnv*, 
     float x2 = ToNDC_X(x + width, vp.Width), y2 = ToNDC_Y(y + height, vp.Height);
 
     float vertices[] = {
-        x1, y1, r, g, b,
-        x2, y1, r, g, b,
-        x2, y2, r, g, b,
-        x1, y2, r, g, b,
-        x1, y1, r, g, b
+        x1, y1, r, g, b, a,
+        x2, y1, r, g, b, a,
+        x2, y2, r, g, b, a,
+        x1, y2, r, g, b, a,
+        x1, y1, r, g, b, a
     };
 
     if (g_vb) g_vb->Release();
@@ -636,15 +700,24 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRectNative(JNIEnv*, 
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
     g_context->Draw(5, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b) {
-    if (!g_device) return;
+    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b, jfloat a) {
+    static int callCount = 0;
+    callCount++;
+    if (callCount <= 5) {
+        printf("[fillRect] #%d: (%.0f,%.0f,%.0f,%.0f) color(%.2f,%.2f,%.2f)\n", callCount, x, y, width, height, r, g, b);
+    }
+    
+    if (!g_device) {
+        printf("[fillRect] ERROR: g_device is null!\n");
+        return;
+    }
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
     g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
@@ -652,6 +725,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     // Apply transformation to corners
     float corners[] = { x, y, x + width, y, x, y + height, x + width, y + height };
@@ -665,12 +741,12 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, 
     float x4 = ToNDC_X(corners[6], vp.Width), y4 = ToNDC_Y(corners[7], vp.Height);
 
     float vertices[] = {
-        x1, y1, r, g, b,
-        x2, y2, r, g, b,
-        x3, y3, r, g, b,
-        x3, y3, r, g, b,
-        x2, y2, r, g, b,
-        x4, y4, r, g, b
+        x1, y1, r, g, b, a,
+        x2, y2, r, g, b, a,
+        x3, y3, r, g, b, a,
+        x3, y3, r, g, b, a,
+        x2, y2, r, g, b, a,
+        x4, y4, r, g, b, a
     };
 
     if (g_vb) g_vb->Release();
@@ -678,14 +754,14 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, 
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->Draw(6, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
+    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -694,6 +770,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -701,7 +780,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, 
     float ry = h / 2.0f;
 
     const int segments = 64;
-    float* vertices = new float[segments * 3 * 5];
+    float* vertices = new float[segments * 3 * 6];
 
     int idx = 0;
     for (int i = 0; i < segments; i++) {
@@ -714,6 +793,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, 
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
 
         // Edge vertex 1
         vertices[idx++] = ToNDC_X(cx + rx * cosf(angle1), vp.Width);
@@ -721,6 +801,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, 
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
 
         // Edge vertex 2
         vertices[idx++] = ToNDC_X(cx + rx * cosf(angle2), vp.Width);
@@ -728,22 +809,23 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, 
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
     }
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { segments * 3 * 5 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { segments * 3 * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->Draw(segments * 3, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
+    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -752,6 +834,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawOvalNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -759,7 +844,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawOvalNative(JNIEnv*, 
     float ry = h / 2.0f;
 
     const int segments = 64;
-    float* vertices = new float[(segments + 1) * 5];
+    float* vertices = new float[(segments + 1) * 6];
 
     int idx = 0;
     for (int i = 0; i <= segments; i++) {
@@ -771,22 +856,23 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawOvalNative(JNIEnv*, 
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
     }
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { (segments + 1) * 5 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { (segments + 1) * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
     g_context->Draw(segments + 1, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, jclass,
-    jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b) {
+    jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -795,13 +881,62 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, 
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
-    float nx1 = ToNDC_X(x1, vp.Width), ny1 = ToNDC_Y(y1, vp.Height);
-    float nx2 = ToNDC_X(x2, vp.Width), ny2 = ToNDC_Y(y2, vp.Height);
+    // Calculate perpendicular offset for thick lines
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
 
+    if (len < 0.0001f) {
+        // Zero-length line, draw a point
+        float nx = ToNDC_X(x1, vp.Width), ny = ToNDC_Y(y1, vp.Height);
+        float vertices[] = { nx, ny, r, g, b, a };
+        if (g_vb) g_vb->Release();
+        D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+        D3D11_SUBRESOURCE_DATA sd = { vertices };
+        g_device->CreateBuffer(&bd, &sd, &g_vb);
+        UINT stride = 24, offset = 0;
+        g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
+        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        g_context->Draw(1, 0);
+        return;
+    }
+
+    // Normal vector (perpendicular to line)
+    float nx = -dy / len;
+    float ny = dx / len;
+
+    // Half-width offset
+    float hw = g_lineWidth / 2.0f;
+    float ox = nx * hw;
+    float oy = ny * hw;
+
+    // Quad corners (2 triangles) - define in clockwise order for DirectX
+    // For a thick line, we create a rectangle perpendicular to the line
+    float x1a = x1 + ox, y1a = y1 + oy;  // start + offset
+    float x1b = x1 - ox, y1b = y1 - oy;  // start - offset
+    float x2a = x2 + ox, y2a = y2 + oy;  // end + offset
+    float x2b = x2 - ox, y2b = y2 - oy;  // end - offset
+
+    // Quad layout:
+    //   x1a,y1a -------- x2a,y2a
+    //      |                |
+    //   x1b,y1b -------- x2b,y2b
+    //
+    // Triangle 1 (CCW): x1a, x1b, x2a
+    // Triangle 2 (CCW): x1b, x2b, x2a
     float vertices[] = {
-        nx1, ny1, r, g, b,
-        nx2, ny2, r, g, b
+        // Triangle 1: top-left, bottom-left, top-right
+        ToNDC_X(x1a, vp.Width), ToNDC_Y(y1a, vp.Height), r, g, b, a,
+        ToNDC_X(x1b, vp.Width), ToNDC_Y(y1b, vp.Height), r, g, b, a,
+        ToNDC_X(x2a, vp.Width), ToNDC_Y(y2a, vp.Height), r, g, b, a,
+        // Triangle 2: bottom-left, bottom-right, top-right
+        ToNDC_X(x1b, vp.Width), ToNDC_Y(y1b, vp.Height), r, g, b, a,
+        ToNDC_X(x2b, vp.Width), ToNDC_Y(y2b, vp.Height), r, g, b, a,
+        ToNDC_X(x2a, vp.Width), ToNDC_Y(y2a, vp.Height), r, g, b, a
     };
 
     if (g_vb) g_vb->Release();
@@ -809,14 +944,14 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, 
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-    g_context->Draw(2, 0);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->Draw(6, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawPolygonNative(JNIEnv* env, jclass,
-    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b) {
+    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device || nPoints < 2) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -825,12 +960,15 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawPolygonNative(JNIEnv
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     jfloat* xArr = env->GetFloatArrayElements(xPoints, nullptr);
     jfloat* yArr = env->GetFloatArrayElements(yPoints, nullptr);
 
     // Line strip with closing vertex
-    float* vertices = new float[(nPoints + 1) * 5];
+    float* vertices = new float[(nPoints + 1) * 6];
 
     int idx = 0;
     for (int i = 0; i < nPoints; i++) {
@@ -839,30 +977,32 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawPolygonNative(JNIEnv
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
     }
     vertices[idx++] = ToNDC_X(xArr[0], vp.Width);
     vertices[idx++] = ToNDC_Y(yArr[0], vp.Height);
     vertices[idx++] = r;
     vertices[idx++] = g;
     vertices[idx++] = b;
+    vertices[idx++] = a;
 
     env->ReleaseFloatArrayElements(xPoints, xArr, JNI_ABORT);
     env->ReleaseFloatArrayElements(yPoints, yArr, JNI_ABORT);
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { (nPoints + 1) * 5 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { (nPoints + 1) * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
     g_context->Draw(nPoints + 1, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillPolygonNative(JNIEnv* env, jclass,
-    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b) {
+    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device || nPoints < 3) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -871,13 +1011,16 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillPolygonNative(JNIEnv
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     jfloat* xArr = env->GetFloatArrayElements(xPoints, nullptr);
     jfloat* yArr = env->GetFloatArrayElements(yPoints, nullptr);
 
     // Triangle list with fan triangulation
     int numTriangles = nPoints - 2;
-    float* vertices = new float[numTriangles * 3 * 5];
+    float* vertices = new float[numTriangles * 3 * 6];
 
     int idx = 0;
     for (int i = 1; i < nPoints - 1; i++) {
@@ -886,6 +1029,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillPolygonNative(JNIEnv
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
 
         // Punkt i
         vertices[idx++] = ToNDC_X(xArr[i], vp.Width);
@@ -893,31 +1037,33 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillPolygonNative(JNIEnv
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
 
         vertices[idx++] = ToNDC_X(xArr[i + 1], vp.Width);
         vertices[idx++] = ToNDC_Y(yArr[i + 1], vp.Height);
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
     }
 
     env->ReleaseFloatArrayElements(xPoints, xArr, JNI_ABORT);
     env->ReleaseFloatArrayElements(yPoints, yArr, JNI_ABORT);
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { numTriangles * 3 * 5 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { numTriangles * 3 * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->Draw(numTriangles * 3, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawArcNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b) {
+    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -926,6 +1072,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawArcNative(JNIEnv*, j
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -935,7 +1084,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawArcNative(JNIEnv*, j
     const int segments = 64;
     float startRad = startAngle * 3.14159265f / 180.0f;
     float endRad = (startAngle + arcAngle) * 3.14159265f / 180.0f;
-    float* vertices = new float[segments * 5];
+    float* vertices = new float[segments * 6];
 
     int idx = 0;
     for (int i = 0; i < segments; i++) {
@@ -948,22 +1097,23 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawArcNative(JNIEnv*, j
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
     }
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { segments * 5 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { segments * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
     g_context->Draw(segments, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillArcNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b) {
+    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b, jfloat a) {
     if (!g_device) return;
 
     D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
@@ -972,6 +1122,9 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillArcNative(JNIEnv*, j
     g_context->VSSetShader(g_vs, nullptr, 0);
     g_context->PSSetShader(g_ps, nullptr, 0);
     g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
 
     float cx = x + w / 2.0f;
     float cy = y + h / 2.0f;
@@ -981,7 +1134,7 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillArcNative(JNIEnv*, j
     const int segments = 64;
     float startRad = startAngle * 3.14159265f / 180.0f;
     float endRad = (startAngle + arcAngle) * 3.14159265f / 180.0f;
-    float* vertices = new float[segments * 3 * 5];
+    float* vertices = new float[segments * 3 * 6];
 
     int idx = 0;
     for (int i = 0; i < segments; i++) {
@@ -996,42 +1149,223 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillArcNative(JNIEnv*, j
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
 
         vertices[idx++] = ToNDC_X(cx + rx * cosf(angle1), vp.Width);
         vertices[idx++] = ToNDC_Y(cy - ry * sinf(angle1), vp.Height);
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
 
         vertices[idx++] = ToNDC_X(cx + rx * cosf(angle2), vp.Width);
         vertices[idx++] = ToNDC_Y(cy - ry * sinf(angle2), vp.Height);
         vertices[idx++] = r;
         vertices[idx++] = g;
         vertices[idx++] = b;
+        vertices[idx++] = a;
     }
 
     if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { segments * 3 * 5 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_BUFFER_DESC bd = { segments * 3 * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
     D3D11_SUBRESOURCE_DATA sd = { vertices };
     g_device->CreateBuffer(&bd, &sd, &g_vb);
     delete[] vertices;
 
-    UINT stride = 20, offset = 0;
+    UINT stride = 24, offset = 0;
     g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->Draw(segments * 3, 0);
 }
 
+// Helper to add a vertex with alpha
+static void AddVertex(float* verts, int& idx, float x, float y, float r, float g, float b, float a) {
+    verts[idx++] = x;
+    verts[idx++] = y;
+    verts[idx++] = r;
+    verts[idx++] = g;
+    verts[idx++] = b;
+    verts[idx++] = a;
+}
+
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRoundRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b) {
-    // Stub: renders as rectangle (complex geometry not implemented)
-    Java_fastgraphics_FastGraphics2D_drawRectNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b, jfloat a) {
+    if (!g_device) return;
+
+    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+    g_context->VSSetShader(g_vs, nullptr, 0);
+    g_context->PSSetShader(g_ps, nullptr, 0);
+    g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
+
+    // Clamp arc dimensions
+    float aw = arcWidth / 2.0f;
+    float ah = arcHeight / 2.0f;
+    if (aw > w / 2.0f) aw = w / 2.0f;
+    if (ah > h / 2.0f) ah = h / 2.0f;
+
+    const int cornerSegments = 16;
+    // 4 corners with arcs + 4 straight lines connecting them
+    const int maxVerts = cornerSegments * 4 + 8;
+
+    float* vertices = new float[maxVerts * 6];
+    int idx = 0;
+
+    // Helper to add a point
+    auto addPoint = [&](float px, float py) {
+        AddVertex(vertices, idx, ToNDC_X(px, vp.Width), ToNDC_Y(py, vp.Height), r, g, b, a);
+    };
+
+    // Helper to add arc for a corner
+    auto addCornerArc = [&](float cx, float cy, float startAngle, float endAngle) {
+        for (int i = 0; i < cornerSegments; i++) {
+            float t = (float)i / (cornerSegments - 1);
+            float angle = startAngle + t * (endAngle - startAngle);
+            float px = cx + aw * cosf(angle);
+            float py = cy + ah * sinf(angle);
+            addPoint(px, py);
+        }
+    };
+
+    // Top-left corner (180 to 270 degrees)
+    addCornerArc(x + aw, y + ah, 3.14159265f, 3.14159265f * 1.5f);
+    // Top edge
+    addPoint(x + w - aw, y);
+    // Top-right corner (270 to 360 degrees)
+    addCornerArc(x + w - aw, y + ah, 3.14159265f * 1.5f, 3.14159265f * 2.0f);
+    // Right edge
+    addPoint(x + w, y + h - ah);
+    // Bottom-right corner (0 to 90 degrees)
+    addCornerArc(x + w - aw, y + h - ah, 0.0f, 3.14159265f * 0.5f);
+    // Bottom edge
+    addPoint(x + aw, y + h);
+    // Bottom-left corner (90 to 180 degrees)
+    addCornerArc(x + aw, y + h - ah, 3.14159265f * 0.5f, 3.14159265f);
+    // Left edge (back to start)
+    addPoint(x, y + ah);
+
+    if (g_vb) g_vb->Release();
+    D3D11_BUFFER_DESC bd = { (UINT)(idx * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_SUBRESOURCE_DATA sd = { vertices };
+    g_device->CreateBuffer(&bd, &sd, &g_vb);
+    delete[] vertices;
+
+    UINT stride = 24, offset = 0;
+    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
+    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
+    g_context->Draw(idx / 6, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRoundRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b) {
-    // Stub: fills as rectangle (complex geometry not implemented)
-    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b, jfloat a) {
+    if (!g_device) return;
+
+    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+    g_context->VSSetShader(g_vs, nullptr, 0);
+    g_context->PSSetShader(g_ps, nullptr, 0);
+    g_context->IASetInputLayout(g_layout);
+    
+    // Apply clipping state
+    ApplyClipState();
+
+    // Clamp arc dimensions
+    float aw = arcWidth / 2.0f;
+    float ah = arcHeight / 2.0f;
+    if (aw > w / 2.0f) aw = w / 2.0f;
+    if (ah > h / 2.0f) ah = h / 2.0f;
+
+    const int cornerSegments = 16;
+    // Triangles needed:
+    // - 4 corners: each has cornerSegments triangles = 4 * 16 = 64
+    // - Center rect: 2 triangles
+    // - 4 side bars: each 2 triangles = 8
+    // Total: 74 triangles = 222 vertices
+    const int maxTriangles = cornerSegments * 4 + 10;
+
+    float* vertices = new float[maxTriangles * 3 * 6];
+    int idx = 0;
+
+    // Helper to add a triangle
+    auto addTri = [&](float x1, float y1, float x2, float y2, float x3, float y3) {
+        AddVertex(vertices, idx, ToNDC_X(x1, vp.Width), ToNDC_Y(y1, vp.Height), r, g, b, a);
+        AddVertex(vertices, idx, ToNDC_X(x2, vp.Width), ToNDC_Y(y2, vp.Height), r, g, b, a);
+        AddVertex(vertices, idx, ToNDC_X(x3, vp.Width), ToNDC_Y(y3, vp.Height), r, g, b, a);
+    };
+
+    // Define key points
+    float left = x, right = x + w, top = y, bottom = y + h;
+    float innerLeft = x + aw, innerRight = x + w - aw;
+    float innerTop = y + ah, innerBottom = y + h - ah;
+
+    // Helper to add corner fan - fan goes from inner corner point to arc edge
+    // Each corner fan creates triangles from inner corner to arc segments
+    auto addCorner = [&](float centerX, float centerY, float startAngle, float endAngle,
+                         float innerCornerX, float innerCornerY) {
+        for (int i = 0; i < cornerSegments; i++) {
+            float t1 = (float)i / cornerSegments;
+            float t2 = (float)(i + 1) / cornerSegments;
+            float angle1 = startAngle + t1 * (endAngle - startAngle);
+            float angle2 = startAngle + t2 * (endAngle - startAngle);
+
+            // Arc points on the outer edge
+            float ax1 = centerX + aw * cosf(angle1);
+            float ay1 = centerY + ah * sinf(angle1);
+            float ax2 = centerX + aw * cosf(angle2);
+            float ay2 = centerY + ah * sinf(angle2);
+
+            // Triangle: inner corner point -> arc point 1 -> arc point 2
+            addTri(innerCornerX, innerCornerY, ax1, ay1, ax2, ay2);
+        }
+    };
+
+    // Top-left corner: center at (innerLeft, innerTop), arc from 180° to 270°
+    // Inner corner connects to (innerLeft, innerTop)
+    addCorner(innerLeft, innerTop, 3.14159265f, 3.14159265f * 1.5f, innerLeft, innerTop);
+
+    // Top-right corner: center at (innerRight, innerTop), arc from 270° to 360°
+    addCorner(innerRight, innerTop, 3.14159265f * 1.5f, 3.14159265f * 2.0f, innerRight, innerTop);
+
+    // Bottom-right corner: center at (innerRight, innerBottom), arc from 0° to 90°
+    addCorner(innerRight, innerBottom, 0.0f, 3.14159265f * 0.5f, innerRight, innerBottom);
+
+    // Bottom-left corner: center at (innerLeft, innerBottom), arc from 90° to 180°
+    addCorner(innerLeft, innerBottom, 3.14159265f * 0.5f, 3.14159265f, innerLeft, innerBottom);
+
+    // Center rectangle (the inner area without corners)
+    addTri(innerLeft, innerTop, innerRight, innerTop, innerLeft, innerBottom);
+    addTri(innerRight, innerTop, innerRight, innerBottom, innerLeft, innerBottom);
+
+    // Top bar: from left inner edge to right inner edge, from top to inner top
+    // Rectangle: (innerLeft, top) -> (innerRight, innerTop)
+    addTri(innerLeft, top, innerRight, top, innerLeft, innerTop);
+    addTri(innerRight, top, innerRight, innerTop, innerLeft, innerTop);
+
+    // Bottom bar: (innerLeft, innerBottom) -> (innerRight, bottom)
+    addTri(innerLeft, innerBottom, innerRight, innerBottom, innerLeft, bottom);
+    addTri(innerRight, innerBottom, innerRight, bottom, innerLeft, bottom);
+
+    // Left bar: (left, innerTop) -> (innerLeft, innerBottom)
+    addTri(left, innerTop, innerLeft, innerTop, left, innerBottom);
+    addTri(innerLeft, innerTop, innerLeft, innerBottom, left, innerBottom);
+
+    // Right bar: (innerRight, innerTop) -> (right, innerBottom)
+    addTri(innerRight, innerTop, right, innerTop, innerRight, innerBottom);
+    addTri(right, innerTop, right, innerBottom, innerRight, innerBottom);
+
+    if (g_vb) g_vb->Release();
+    D3D11_BUFFER_DESC bd = { (UINT)(idx * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_SUBRESOURCE_DATA sd = { vertices };
+    g_device->CreateBuffer(&bd, &sd, &g_vb);
+    delete[] vertices;
+
+    UINT stride = 24, offset = 0;
+    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->Draw(idx / 6, 0);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_translateNative(JNIEnv*, jclass, jfloat tx, jfloat ty) {
@@ -1056,6 +1390,10 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_resetTransformNative(JNI
     g_rotation = 0.0f;
 }
 
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setUIScaleNative(JNIEnv*, jclass, jfloat scale) {
+    g_uiScale = scale;
+}
+
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setStrokeNative(JNIEnv*, jclass, jfloat lineWidth) {
     g_lineWidth = lineWidth;
 }
@@ -1065,19 +1403,71 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setAntiAliasingNative(JN
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setClipNative(JNIEnv*, jclass, jfloat x, jfloat y, jfloat w, jfloat h) {
-    // Stub: clipping not supported (requires scissor rects or stencil buffer)
-    g_clipX = x;
-    g_clipY = y;
-    g_clipW = w;
-    g_clipH = h;
+    printf("[setClipNative] CALLED with (%.0f, %.0f, %.0f, %.0f)\n", x, y, w, h);
+    fflush(stdout);
+    
+    if (!g_context) {
+        printf("[setClipNative] ERROR: g_context is null!\n");
+        return;
+    }
+
+    // Store clip values for reference
+    g_clipX = x; g_clipY = y; g_clipW = w; g_clipH = h;
     g_clipEnabled = true;
+    printf("[setClipNative] g_clipEnabled set to TRUE\n");
+
+    // Get viewport to calculate proper scissor rect in pixels
+    D3D11_VIEWPORT vp;
+    UINT num = 1;
+    g_context->RSGetViewports(&num, &vp);
+
+    // Convert from screen coordinates to pixel coordinates
+    // DirectX scissor rects are in pixel coordinates (top-left origin, Y goes down)
+    // Our screen coords have Y from top-left, so we just scale by UI scale
+    long left = (long)(x * g_uiScale);
+    long top = (long)(y * g_uiScale);
+    long right = (long)((x + w) * g_uiScale);
+    long bottom = (long)((y + h) * g_uiScale);
+
+    // Clamp to viewport bounds
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > (long)vp.Width) right = (long)vp.Width;
+    if (bottom > (long)vp.Height) bottom = (long)vp.Height;
+
+    // Set scissor rect (in pixel coordinates)
+    D3D11_RECT scissorRect = { left, top, right, bottom };
+    g_context->RSSetScissorRects(1, &scissorRect);
+
+    // Enable scissor test using cached rasterizer state
+    if (g_rsScissorEnabled) {
+        g_context->RSSetState(g_rsScissorEnabled);
+    }
+    
+    printf("[setClip] uiScale=%.2f, screen(%.0f,%.0f,%.0f,%.0f) -> pixels(%ld,%ld,%ld,%ld), vp(%.0f,%.0f)\n",
+           g_uiScale, x, y, w, h, left, top, right, bottom, vp.Width, vp.Height);
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_resetClipNative(JNIEnv*, jclass) {
+    if (!g_context) return;
+
     g_clipEnabled = false;
+
+    // Reset scissor rect to full viewport
+    D3D11_VIEWPORT vp;
+    UINT num = 1;
+    g_context->RSGetViewports(&num, &vp);
+
+    D3D11_RECT scissorRect = { 0, 0, (long)vp.Width, (long)vp.Height };
+    g_context->RSSetScissorRects(1, &scissorRect);
+
+    // Disable scissor test using cached rasterizer state
+    if (g_rsScissorDisabled) {
+        g_context->RSSetState(g_rsScissorDisabled);
+    }
 }
 
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawStringNative(JNIEnv* env, jclass, jstring str, jfloat x, jfloat y, jfloat r, jfloat g, jfloat b) {
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawStringNative(JNIEnv* env, jclass, jstring str, jfloat x, jfloat y, jfloat r, jfloat g, jfloat b, jfloat a) {
     // Stub: text rendering not supported (requires textured shaders)
 }
 
@@ -1341,12 +1731,12 @@ JNIEXPORT void JNICALL Java_demo_DrawRectTest_init(JNIEnv*, jclass, jlong hwnd) 
 
 JNIEXPORT void JNICALL Java_demo_DrawRectTest_drawRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawRectNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawRectTest_fillRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawRectTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
@@ -1367,12 +1757,12 @@ JNIEXPORT void JNICALL Java_demo_DrawOvalTest_init(JNIEnv*, jclass, jlong hwnd) 
 
 JNIEXPORT void JNICALL Java_demo_DrawOvalTest_fillOvalNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillOvalNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillOvalNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawOvalTest_drawOvalNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawOvalNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawOvalNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawOvalTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
@@ -1393,7 +1783,7 @@ JNIEXPORT void JNICALL Java_demo_DrawLineTest_init(JNIEnv*, jclass, jlong hwnd) 
 
 JNIEXPORT void JNICALL Java_demo_DrawLineTest_drawLineNative(JNIEnv*, jclass,
     jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawLineNative(nullptr, nullptr, x1, y1, x2, y2, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawLineNative(nullptr, nullptr, x1, y1, x2, y2, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawLineTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
@@ -1414,12 +1804,12 @@ JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_init(JNIEnv*, jclass, jlong hwn
 
 JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_drawPolygonNative(JNIEnv* env, jclass,
     jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawPolygonNative(env, nullptr, xPoints, yPoints, nPoints, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawPolygonNative(env, nullptr, xPoints, yPoints, nPoints, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_fillPolygonNative(JNIEnv* env, jclass,
     jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillPolygonNative(env, nullptr, xPoints, yPoints, nPoints, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillPolygonNative(env, nullptr, xPoints, yPoints, nPoints, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
@@ -1440,12 +1830,12 @@ JNIEXPORT void JNICALL Java_demo_DrawArcTest_init(JNIEnv*, jclass, jlong hwnd) {
 
 JNIEXPORT void JNICALL Java_demo_DrawArcTest_drawArcNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawArcNative(nullptr, nullptr, x, y, w, h, startAngle, arcAngle, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawArcNative(nullptr, nullptr, x, y, w, h, startAngle, arcAngle, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawArcTest_fillArcNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillArcNative(nullptr, nullptr, x, y, w, h, startAngle, arcAngle, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillArcNative(nullptr, nullptr, x, y, w, h, startAngle, arcAngle, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawArcTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
@@ -1466,7 +1856,7 @@ JNIEXPORT void JNICALL Java_demo_TransformTest_init(JNIEnv*, jclass, jlong hwnd)
 
 JNIEXPORT void JNICALL Java_demo_TransformTest_fillRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_TransformTest_translateNative(JNIEnv*, jclass, jfloat tx, jfloat ty) {
@@ -1503,12 +1893,12 @@ JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_init(JNIEnv*, jclass, jlong hw
 
 JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_drawOvalNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawOvalNative(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawOvalNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_drawLineNative(JNIEnv*, jclass,
     jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawLineNative(nullptr, nullptr, x1, y1, x2, y2, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawLineNative(nullptr, nullptr, x1, y1, x2, y2, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_setAntiAliasingNative(JNIEnv*, jclass, jboolean enabled) {
@@ -1533,12 +1923,12 @@ JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_init(JNIEnv*, jclass, jlong h
 
 JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_drawRoundRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawRoundRectNative(nullptr, nullptr, x, y, w, h, arcWidth, arcHeight, r, g, b);
+    Java_fastgraphics_FastGraphics2D_drawRoundRectNative(nullptr, nullptr, x, y, w, h, arcWidth, arcHeight, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_fillRoundRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillRoundRectNative(nullptr, nullptr, x, y, w, h, arcWidth, arcHeight, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillRoundRectNative(nullptr, nullptr, x, y, w, h, arcWidth, arcHeight, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
@@ -1574,6 +1964,22 @@ JNIEXPORT void JNICALL Java_demo_TVTestPattern_present(JNIEnv*, jclass) {
 }
 
 JNIEXPORT jlong JNICALL Java_demo_TVTestPattern_findWindow(JNIEnv* env, jclass, jstring title) {
+    return Java_demo_DemoApp_findWindow(env, nullptr, title);
+}
+
+JNIEXPORT void JNICALL Java_demo_TransparencyTest_init(JNIEnv*, jclass, jlong hwnd) {
+    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
+}
+
+JNIEXPORT void JNICALL Java_demo_TransparencyTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
+    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
+}
+
+JNIEXPORT void JNICALL Java_demo_TransparencyTest_present(JNIEnv*, jclass) {
+    Java_demo_DemoApp_present(nullptr, nullptr);
+}
+
+JNIEXPORT jlong JNICALL Java_demo_TransparencyTest_findWindow(JNIEnv* env, jclass, jstring title) {
     return Java_demo_DemoApp_findWindow(env, nullptr, title);
 }
 
