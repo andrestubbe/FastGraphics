@@ -1,6 +1,33 @@
 /**
- * FastGraphics - GPU-accelerated 2D Rendering for Java
- * DirectX 11 Implementation
+ * @file FastGraphics.cpp
+ * @brief FastGraphics native implementation - GPU-accelerated 2D rendering
+ *
+ * @details DirectX 11 based 2D rendering for Java with:
+ * - Hardware-accelerated primitive drawing
+ * - Texture loading and rendering
+ * - Double-buffered presentation
+ * - Simple immediate-mode API
+ *
+ * @par Features
+ * - Point, line, rectangle drawing
+ * - Texture loading from memory
+ * - Color and alpha blending
+ * - Window or fullscreen rendering
+ *
+ * @par Architecture
+ * - D3D11 device with feature level 11.0
+ * - Simple vertex/pixel shaders for 2D quads
+ * - Dynamic vertex buffer for primitives
+ * - Sampler state for texture filtering
+ *
+ * @par Limitations
+ * - Simple 2D only (no 3D transforms)
+ * - Immediate mode (no batching)
+ * - Single render target
+ *
+ * @author FastJava Team
+ * @version 1.3.1
+ * @copyright MIT License
  */
 
 #include <jni.h>
