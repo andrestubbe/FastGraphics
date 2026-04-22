@@ -1,4 +1,4 @@
-# FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
+# FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D) [ALPHA]
 
 > **🎨 MAJOR UPDATE** - Alpha Transparency & Rounded Rectangles now fully implemented! See [TODO.md](TODO.md) for remaining features.
 
