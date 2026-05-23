@@ -1,4 +1,4 @@
-# FastGraphics — Ultra-Fast Native Graphics Engine for Java [v0.1.0]
+﻿# FastGraphics â€” Ultra-Fast Native Graphics Engine for Java [v0.1.0]
 
 **A high-performance native rendering module for the FastJava ecosystem. Accelerated drawing, blending, and image manipulation via DirectX and SIMD.**
 
@@ -17,17 +17,17 @@
 - [License](#license)
 
 ## Features
-- **⚡ Hardware Accelerated**: Direct drawing via DirectX/GDI+ native pipelines.
-- **🎨 Advanced Blending**: High-speed alpha blending and transparency.
-- **📦 Zero GC Stalls**: Native memory buffers for rendering assets.
-- **🚀 Raw Speed**: Built for real-time visualization and complex motion graphics.
+- **âš¡ Hardware Accelerated**: Direct drawing via DirectX/GDI+ native pipelines.
+- **ðŸŽ¨ Advanced Blending**: High-speed alpha blending and transparency.
+- **ðŸ“¦ Zero GC Stalls**: Native memory buffers for rendering assets.
+- **ðŸš€ Raw Speed**: Built for real-time visualization and complex motion graphics.
 
 ## Installation
 
 ### Option 1: Maven (Recommended)
 Add the JitPack repository and the dependencies to your `pom.xml`:
 
-`xml
+```xml
 <repositories>
     <repository>
         <id>jitpack.io</id>
@@ -42,6 +42,7 @@ Add the JitPack repository and the dependencies to your `pom.xml`:
         <artifactId>fastgraphics</artifactId>
         <version>v0.1.0</version>
     </dependency>
+
     <!-- FastCore (Required Native Loader) -->
     <dependency>
         <groupId>com.github.andrestubbe</groupId>
@@ -49,19 +50,19 @@ Add the JitPack repository and the dependencies to your `pom.xml`:
         <version>v0.1.0</version>
     </dependency>
 </dependencies>
-`
+```
 
 ### Option 2: Gradle (via JitPack)
-`groovy
+```groovy
 repositories {
     maven { url 'https://jitpack.io' }
 }
 
 dependencies {
-    implementation 'com.github.andrestubbe:.1.0'
+    implementation 'com.github.andrestubbe:fastgraphics:v0.1.0'
     implementation 'com.github.andrestubbe:fastcore:v0.1.0'
 }
-`
+```
 
 ### Option 3: Direct Download (No Build Tool)
 Download the latest JARs directly to add them to your classpath:
@@ -74,7 +75,7 @@ Download the latest JARs directly to add them to your classpath:
 
 
 ## License
-MIT License — See [LICENSE](LICENSE) for details.
+MIT License â€” See [LICENSE](LICENSE) for details.
 
 ---
-**Part of the FastJava Ecosystem** — *Making the JVM faster.*
+**Part of the FastJava Ecosystem** â€” *Making the JVM faster.*
