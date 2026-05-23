@@ -4,11 +4,6 @@
 
 **⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
 
-[![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
-[![Java](https://img.shields.io/badge/Java-17+-blue.svg)](https://www.java.com)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 <!-- TODO: Add benchmark image here when available -->
 <!-- ![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png) -->
 
@@ -35,6 +30,12 @@ FastGraphics is a **high-performance GPU-accelerated 2D rendering library** that
 **Keywords:** java graphics2d alternative, gpu accelerated 2d rendering, directx java rendering, fast fillRect, java game engine 2d, hardware accelerated graphics, batch rendering java, instanced rendering 2d, 600fps java graphics
 
 If you need **thousands of shapes at 60fps+**, **batch rendering**, or **GPU-accelerated 2D**, FastGraphics delivers native-level DirectX 11 performance with Java simplicity.
+
+[![Status](https://img.shields.io/badge/status-v0.1.0-brightgreen.svg)](https://github.com/andrestubbe/FastGraphics/releases/tag/v0.1.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Java](https://img.shields.io/badge/Java-17+-blue.svg)](https://www.java.com)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
+[![JitPack](https://img.shields.io/badge/JitPack-ready-green.svg)](https://jitpack.io/#andrestubbe)
 
 ---
 
