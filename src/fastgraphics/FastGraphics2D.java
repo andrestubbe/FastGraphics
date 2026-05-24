@@ -380,15 +380,22 @@ public class FastGraphics2D {
         Integer textureId = textureCache.get(img);
         
         if (textureId == null) {
+            System.out.println("Texture not in cache, loading...");
             // Load texture
             textureId = loadTexture(img);
             if (textureId >= 0) {
                 textureCache.put(img, textureId);
+                System.out.println("Texture cached with ID: " + textureId);
             }
+        } else {
+            System.out.println("Texture found in cache with ID: " + textureId);
         }
         
         if (textureId != null && textureId >= 0) {
+            System.out.println("Drawing textured quad with ID: " + textureId + " at " + x + "," + y + " size " + w + "x" + h);
             drawTexturedQuadNative(textureId, x, y, w, h);
+        } else {
+            System.out.println("ERROR: textureId is null or negative: " + textureId);
         }
     }
     
@@ -419,10 +426,15 @@ public class FastGraphics2D {
         int width = argbImg.getWidth();
         int height = argbImg.getHeight();
         
+        System.out.println("Loading texture: " + width + "x" + height + ", type=" + img.getType());
+        
         // Get pixel data
         int[] pixels = ((DataBufferInt) argbImg.getRaster().getDataBuffer()).getData();
         
-        return loadTextureNative(pixels, width, height);
+        int textureId = loadTextureNative(pixels, width, height);
+        System.out.println("Texture loaded with ID: " + textureId);
+        
+        return textureId;
     }
 
     private int currentVertexOffset = 0;

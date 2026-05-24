@@ -382,41 +382,6 @@ JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
     g_context->RSSetViewports(1, &vp2);
 }
 
-JNIEXPORT void JNICALL Java_demo_DemoApp_fillRect(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b) {
-    if (!g_device) return;
-    
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    
-    // Set shaders
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    float x1 = ToNDC_X(x, vp.Width), y1 = ToNDC_Y(y, vp.Height);
-    float x2 = ToNDC_X(x + width, vp.Width), y2 = ToNDC_Y(y + height, vp.Height);
-    
-    float vertices[] = {
-        x1, y1, r, g, b, 1.0f,
-        x2, y1, r, g, b, 1.0f,
-        x1, y2, r, g, b, 1.0f,
-        x1, y2, r, g, b, 1.0f,
-        x2, y1, r, g, b, 1.0f,
-        x2, y2, r, g, b, 1.0f
-    };
-    
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(6, 0);
-}
-
 JNIEXPORT void JNICALL Java_demo_DemoApp_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
     if (g_context && g_rtv) {
         float clear[4] = { r, g, b, 1.0f };
@@ -1569,7 +1534,7 @@ JNIEXPORT jint JNICALL Java_fastgraphics_FastGraphics2D_loadTextureNative(JNIEnv
     
     jint* pixels = env->GetIntArrayElements(pixelData, nullptr);
     if (!pixels) return -1;
-    
+
     // Create texture
     D3D11_TEXTURE2D_DESC texDesc = {};
     texDesc.Width = width;
@@ -1580,7 +1545,7 @@ JNIEXPORT jint JNICALL Java_fastgraphics_FastGraphics2D_loadTextureNative(JNIEnv
     texDesc.SampleDesc.Count = 1;
     texDesc.Usage = D3D11_USAGE_IMMUTABLE;
     texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    
+
     D3D11_SUBRESOURCE_DATA initData = {};
     initData.pSysMem = pixels;
     initData.SysMemPitch = width * 4;
@@ -1588,23 +1553,28 @@ JNIEXPORT jint JNICALL Java_fastgraphics_FastGraphics2D_loadTextureNative(JNIEnv
     ID3D11Texture2D* texture = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
     
-    if (FAILED(g_device->CreateTexture2D(&texDesc, &initData, &texture))) {
-        env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
-        return -1;
-    }
-    
-    if (FAILED(g_device->CreateShaderResourceView(texture, nullptr, &srv))) {
-        texture->Release();
-        env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
-        return -1;
-    }
-    
+    HRESULT hrTex = g_device->CreateTexture2D(&texDesc, &initData, &texture);
     env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
-    
+
+    if (FAILED(hrTex)) {
+        fprintf(stderr, "[FastGraphics] loadTextureNative: CreateTexture2D FAILED! hr=0x%08X\n", hrTex);
+        return -1;
+    }
+    fprintf(stderr, "[FastGraphics] loadTextureNative: Texture created OK\n");
+
+    HRESULT hrSrv = g_device->CreateShaderResourceView(texture, nullptr, &srv);
+    if (FAILED(hrSrv)) {
+        fprintf(stderr, "[FastGraphics] loadTextureNative: CreateShaderResourceView FAILED! hr=0x%08X\n", hrSrv);
+        texture->Release();
+        return -1;
+    }
+    fprintf(stderr, "[FastGraphics] loadTextureNative: SRV created OK\n");
+
     // Store in cache
     int id = g_nextTextureId++;
     g_textureCache[id] = { texture, srv };
-    
+
+    fprintf(stderr, "[FastGraphics] loadTextureNative: Texture ID %d cached\n", id);
     return id;
 }
 
@@ -1618,10 +1588,19 @@ JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_unloadTextureNative(JNIE
 }
 
 JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawTexturedQuadNative(JNIEnv*, jclass, jint textureId, jfloat x, jfloat y, jfloat w, jfloat h) {
-    if (!g_device || !g_context) return;
+    fprintf(stderr, "[drawTexturedQuad] textureId=%d, x=%.2f, y=%.2f, w=%.2f, h=%.2f\n", textureId, x, y, w, h);
+    
+    if (!g_device || !g_context) {
+        fprintf(stderr, "[drawTexturedQuad] ERROR: g_device or g_context is null\n");
+        return;
+    }
     
     auto it = g_textureCache.find(textureId);
-    if (it == g_textureCache.end()) return;
+    if (it == g_textureCache.end()) {
+        fprintf(stderr, "[drawTexturedQuad] ERROR: textureId %d not found in cache\n", textureId);
+        return;
+    }
+    fprintf(stderr, "[drawTexturedQuad] texture found in cache\n");
     
     D3D11_VIEWPORT vp; UINT num = 1;
     g_context->RSGetViewports(&num, &vp);
@@ -1697,7 +1676,7 @@ JNIEXPORT void JNICALL Java_demo_BenchmarkApp_init(JNIEnv*, jclass, jlong hwnd) 
 }
 
 JNIEXPORT void JNICALL Java_demo_BenchmarkApp_fillRect(JNIEnv*, jclass, float x, float y, float w, float h, float r, float g, float b) {
-    Java_demo_DemoApp_fillRect(nullptr, nullptr, x, y, w, h, r, g, b);
+    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
 }
 
 JNIEXPORT void JNICALL Java_demo_BenchmarkApp_clear(JNIEnv*, jclass, float r, float g, float b) {
@@ -1763,7 +1742,47 @@ JNIEXPORT void JNICALL Java_demo_DrawRectTest_drawRectNative(JNIEnv*, jclass,
 
 JNIEXPORT void JNICALL Java_demo_DrawRectTest_fillRectNative(JNIEnv*, jclass,
     jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
+    static int callCount = 0;
+    callCount++;
+    if (callCount <= 3) {
+        printf("[DrawRectTest_fillRect] #%d: (%.0f,%.0f,%.0f,%.0f) color(%.2f,%.2f,%.2f)\n", callCount, x, y, w, h, r, g, b);
+    }
+
+    if (!g_device) {
+        printf("[DrawRectTest_fillRect] ERROR: g_device is null!\n");
+        return;
+    }
+
+    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+
+    // Set shaders
+    g_context->VSSetShader(g_vs, nullptr, 0);
+    g_context->PSSetShader(g_ps, nullptr, 0);
+    g_context->IASetInputLayout(g_layout);
+
+    float x1 = ToNDC_X(x, vp.Width), y1 = ToNDC_Y(y, vp.Height);
+    float x2 = ToNDC_X(x + w, vp.Width), y2 = ToNDC_Y(y + h, vp.Height);
+
+    float vertices[] = {
+        x1, y1, r, g, b, 1.0f,
+        x2, y1, r, g, b, 1.0f,
+        x1, y2, r, g, b, 1.0f,
+        x1, y2, r, g, b, 1.0f,
+        x2, y1, r, g, b, 1.0f,
+        x2, y2, r, g, b, 1.0f
+    };
+
+    if (g_vb) g_vb->Release();
+    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_SUBRESOURCE_DATA sd = { vertices };
+    g_device->CreateBuffer(&bd, &sd, &g_vb);
+
+    UINT stride = 24, offset = 0;
+    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->Draw(6, 0);
+    printf("[DrawRectTest_fillRect] Draw called, NDC: (%.2f,%.2f) to (%.2f,%.2f)\n", x1, y1, x2, y2);
 }
 
 JNIEXPORT void JNICALL Java_demo_DrawRectTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {

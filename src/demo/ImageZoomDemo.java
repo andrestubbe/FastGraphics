@@ -117,17 +117,20 @@ public class ImageZoomDemo {
         int windowW = 800;
         int windowH = 600;
         float time = 0;
-        
+
+        // Scale screenshot to fit window (1920x1080 -> 800x450 to fit with margins)
+        float baseScale = Math.min((float)windowW / screenshot.getWidth(), (float)windowH / screenshot.getHeight()) * 0.8f;
+
         while (frame.isVisible()) {
             // Zeit für Animation
             time += 0.016f; // ~60 FPS
-            
-            // Sinus-Animation für Zoom: 0.5 -> 2.0 -> 0.5
-            zoom = 1.0f + 0.8f * (float)Math.sin(time * 0.5);
-            
-            // Sinus-Animation für Pan (kreisförmig)
-            offsetX = 100.0f * (float)Math.cos(time * 0.3);
-            offsetY = 100.0f * (float)Math.sin(time * 0.3);
+
+            // Sinus-Animation für Zoom: 0.8x -> 1.2x of base scale
+            zoom = baseScale * (1.0f + 0.2f * (float)Math.sin(time * 0.5));
+
+            // Sinus-Animation für Pan (kreisförmig, smaller range)
+            offsetX = 30.0f * (float)Math.cos(time * 0.3);
+            offsetY = 30.0f * (float)Math.sin(time * 0.3);
             
             // Hintergrund
             g.setColor(Color.DARK_GRAY);
@@ -142,7 +145,9 @@ public class ImageZoomDemo {
             float drawY = (windowH - imgH) / 2.0f + offsetY;
             
             // Bild zeichnen
+            System.out.println("Drawing image: " + screenshot.getWidth() + "x" + screenshot.getHeight() + " at " + drawX + "," + drawY + " size " + imgW + "x" + imgH);
             g.drawImage(screenshot, drawX, drawY, imgW, imgH);
+            System.out.println("Image draw call completed");
             
             // Zoom-Anzeige (als Rechtecke statt Text, da drawString noch nicht geht)
             g.setColor(Color.BLACK);
