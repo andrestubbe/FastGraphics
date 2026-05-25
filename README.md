@@ -1,64 +1,29 @@
 ﻿# FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
 
-> **🎨 MAJOR UPDATE** - Alpha Transparency & Rounded Rectangles now fully implemented! See [TODO.md](TODO.md) for
-> remaining features.
-
-**⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
-
-<!-- TODO: Add benchmark image here when available -->
-<!-- ![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png) -->
-
-```java
-// Quick Start — Ultra-fast 2D rendering
-FastGraphics2D g = new FastGraphics2D(hwnd);
-g.
-
-setColor(Color.RED);
-g.
-
-fillRect(10,10,100,50);
-g.
-
-setColor(Color.BLUE);
-g.
-
-fillOval(200,100,30,30);
-g.
-
-present();  // 1 Draw Call für alles!
-
-// NEW: Alpha transparency support!
-g.
-
-setColor(new Color(255, 0,0,128)); // 50% transparent red
-        g.
-
-fillOval(100,100,200,200);
-
-// NEW: Rounded rectangles!
-g.
-
-setColor(new Color(0, 200,255));
-        g.
-
-fillRoundRect(300,200,150,100,20,20);
-```
-
-FastGraphics is a **high-performance GPU-accelerated 2D rendering library** that replaces `java.awt.Graphics2D` with a *
-*native DirectX 11 backend**. Built for **real-time games**, **data visualization**, **scientific applications**, and *
-*high-frequency UI rendering** where Java2D performance bottlenecks.
-
-**Keywords:** java graphics2d alternative, gpu accelerated 2d rendering, directx java rendering, fast fillRect, java
-game engine 2d, hardware accelerated graphics, batch rendering java, instanced rendering 2d, 600fps java graphics
-
-If you need **thousands of shapes at 60fps+**, **batch rendering**, or **GPU-accelerated 2D**, FastGraphics delivers
-native-level DirectX 11 performance with Java simplicity.
 
 [![Status](https://img.shields.io/badge/status-v0.1.0-brightgreen.svg)](https://github.com/andrestubbe/FastGraphics/releases/tag/v0.1.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Java](https://img.shields.io/badge/Java-17+-blue.svg)](https://www.java.com)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
 [![JitPack](https://img.shields.io/badge/JitPack-ready-green.svg)](https://jitpack.io/#andrestubbe)
+
+---
+
+> **🎨 MAJOR UPDATE** - Alpha Transparency & Rounded Rectangles now fully implemented! See [TODO.md](TODO.md) for
+> remaining features.
+
+**⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
+
+FastGraphics is a **high-performance GPU-accelerated 2D rendering library** that replaces `java.awt.Graphics2D` with a *
+*native DirectX 11 backend**. Built for **real-time games**, **data visualization**, **scientific applications**, and *
+*high-frequency UI rendering** where Java2D performance bottlenecks.
+
+If you need **thousands of shapes at 60fps+**, **batch rendering**, or **GPU-accelerated 2D**, FastGraphics delivers
+native-level DirectX 11 performance with Java simplicity.
+
+---
+
+[![FastKeyboard Showcase](docs/screenshot.png)](https://www.youtube.com/watch?v=BZsqQl7WqWk)
 
 ---
 
@@ -75,6 +40,34 @@ native-level DirectX 11 performance with Java simplicity.
 - [License](#license)
 
 ---
+
+## Quick Start
+
+
+```java
+// Quick Start — Ultra-fast 2D rendering
+FastGraphics2D g = new FastGraphics2D(hwnd);
+
+g.setColor(Color.RED);
+g.fillRect(10, 10, 100, 50);
+
+g.setColor(Color.BLUE);
+g.fillOval(200, 100, 30, 30);
+
+// NEW: Alpha transparency support!
+g.setColor(new Color(255, 0, 0, 128)); // 50% transparent red
+g.fillOval(100, 100, 200, 200);
+
+// NEW: Rounded rectangles!
+g.setColor(new Color(0, 200, 255));
+g.fillRoundRect(300, 200, 150, 100, 20, 20);
+
+g.present();  // 1 Draw Call für alles!
+
+```
+
+---
+
 
 ## Why FastGraphics?
 
@@ -229,26 +222,17 @@ FastGraphics automatically batches operations. No manual `beginBatch()` / `endBa
 
 ```java
 g.setColor(Color.RED);
-g.
-
-fillRect(0,0,50,50);   // Queued
+g.fillRect(0, 0, 50, 50);   // Queued
 
 // No color change = same batch
-g.
-
-fillRect(60,0,50,50);  // Same batch
+g.fillRect(60, 0, 50, 50);  // Same batch
 
 // Color change = auto-flush, new batch
-g.
+g.setColor(Color.BLUE);
+g.fillRect(120, 0, 50, 50); // New batch
 
-setColor(Color.BLUE);
-g.
+g.present();  // All batches rendered in 1–2 draw calls
 
-fillRect(120,0,50,50); // New batch
-
-g.
-
-present();  // All batches rendered in 1-2 draw calls
 ```
 
 ---
@@ -267,8 +251,6 @@ cd examples/50-image && mvn compile exec:java              # Image rendering
 cd examples/60-comparison && mvn compile exec:java         # FastGraphics vs Java2D
 cd examples/70-simple && mvn compile exec:java             # Simple tests
 ```
-
----
 
 ---
 
