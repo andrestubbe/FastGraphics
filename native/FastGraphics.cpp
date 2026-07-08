@@ -1,2032 +1,478 @@
-/**
- * @file FastGraphics.cpp
- * @brief FastGraphics native implementation - GPU-accelerated 2D rendering
- *
- * @details DirectX 11 based 2D rendering for Java with:
- * - Hardware-accelerated primitive drawing
- * - Texture loading and rendering
- * - Double-buffered presentation
- * - Simple immediate-mode API
- *
- * @par Features
- * - Point, line, rectangle drawing
- * - Texture loading from memory
- * - Color and alpha blending
- * - Window or fullscreen rendering
- *
- * @par Architecture
- * - D3D11 device with feature level 11.0
- * - Simple vertex/pixel shaders for 2D quads
- * - Dynamic vertex buffer for primitives
- * - Sampler state for texture filtering
- *
- * @par Limitations
- * - Simple 2D only (no 3D transforms)
- * - Immediate mode (no batching)
- * - Single render target
- *
- * @author FastJava Team
- * @version 1.3.1
- * @copyright MIT License
- */
-
-#include <jni.h>
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
-#include <math.h>
+#include <directxmath.h>
+#include <map>
+#include <vector>
+#include <string>
+#include <jni.h>
+#include <d2d1_1.h>
+#include <dwrite.h>
 
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "d3dcompiler.lib")
-#pragma comment(lib, "user32.lib")
+using namespace DirectX;
+
+struct ConstantBuffer {
+    XMMATRIX transform;
+    float smoothness;
+    float pad[3];
+};
+
+struct InstanceData {
+    XMFLOAT2 pos;
+    XMFLOAT2 size;
+    XMFLOAT4 color;
+    XMFLOAT4 params; // [p1, p2, type, p3]
+};
 
 static ID3D11Device* g_device = nullptr;
 static ID3D11DeviceContext* g_context = nullptr;
 static IDXGISwapChain* g_swapChain = nullptr;
 static ID3D11RenderTargetView* g_rtv = nullptr;
-static ID3D11Buffer* g_vb = nullptr;
+static ID3D11Buffer* g_cb = nullptr;
+static ID3D11Buffer* g_quadVB = nullptr;
+static ID3D11Buffer* g_instanceVB = nullptr;
 static ID3D11VertexShader* g_vs = nullptr;
 static ID3D11PixelShader* g_ps = nullptr;
 static ID3D11InputLayout* g_layout = nullptr;
+static ID3D11BlendState* g_bsAlpha = nullptr;
+static ID3D11RasterizerState* g_rs = nullptr;
+static ID3D11SamplerState* g_samplerLinear = nullptr;
+static ID3D11SamplerState* g_samplerPoint = nullptr;
 
-// Texture management
-static ID3D11VertexShader* g_vsTextured = nullptr;
-static ID3D11PixelShader* g_psTextured = nullptr;
-static ID3D11InputLayout* g_layoutTextured = nullptr;
-static ID3D11Buffer* g_texturedVB = nullptr;
-static ID3D11SamplerState* g_sampler = nullptr;
+static HWND g_hwnd = NULL;
+static int g_renderWidth = 0;
+static int g_renderHeight = 0;
+static bool g_aaEnabled = false;
 
-// Texture cache: ID -> {texture, srv}
+static ID2D1Factory1* g_d2dFactory = nullptr;
+static IDWriteFactory* g_dwFactory = nullptr;
+static ID2D1DeviceContext* g_d2dContext = nullptr;
+static ID2D1SolidColorBrush* g_textBrush = nullptr;
+
+static const int MAX_INSTANCES = 16384;
+
 struct TextureEntry {
-    ID3D11Texture2D* texture;
     ID3D11ShaderResourceView* srv;
+    int w, h;
 };
-#include <map>
-static std::map<int, TextureEntry> g_textureCache;
-static int g_nextTextureId = 1;
+std::map<int, TextureEntry> g_textures;
+int g_nextTextureId = 1;
 
-// Standard vertex shader with alpha
-const char* VS_SRC = R"(
-    struct VS_INPUT {
-        float2 pos : POSITION;
-        float4 color : COLOR;
-    };
-    struct VS_OUTPUT {
-        float4 pos : SV_POSITION;
-        float4 color : COLOR;
-    };
-    VS_OUTPUT main(VS_INPUT input) {
-        VS_OUTPUT output;
-        output.pos = float4(input.pos, 0.0, 1.0);
-        output.color = input.color;
-        return output;
+const char* SHADER_SRC = R"(
+struct VS_INPUT {
+    float2 pos : POSITION;
+    float2 quadPos : TEXCOORD;
+};
+struct INSTANCE {
+    float2 pos : I_POS;
+    float2 size : I_SIZE;
+    float4 color : I_COLOR;
+    float4 params : I_PARAMS;
+};
+struct PS_INPUT {
+    float4 pos : SV_POSITION;
+    float4 color : COLOR;
+    float2 localPos : TEXCOORD0;
+    float4 params : PARAMS;
+    float2 pixelPos : TEXCOORD1;
+    float2 p1 : P1;
+    float2 p2 : P2;
+    float2 p3 : P3;
+};
+
+cbuffer cb0 : register(b0) { 
+    float4x4 transform; 
+    float smoothness;
+}
+Texture2D tex : register(t0);
+SamplerState smp : register(s0);
+
+float sdRoundRect(float2 p, float2 b, float r) {
+    float2 d = abs(p) - b + r;
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - r;
+}
+
+float sdTriangle(float2 p, float2 p0, float2 p1, float2 p2) {
+    float2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
+    float2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
+    float2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+    float2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+    float2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+    float s = sign(e0.x * e2.y - e0.y * e2.x);
+    float2 d = min(min(float2(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)),
+                       float2(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))),
+                   float2(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x)));
+    return -sqrt(d.x) * sign(d.y);
+}
+
+PS_INPUT vs_main(VS_INPUT input, INSTANCE instance) {
+    PS_INPUT output;
+    float type = instance.params.z;
+    float2 pixelPos;
+    if (type == 6 || type == 7) { 
+        float2 p1 = instance.pos, p2 = instance.size, p3 = instance.params.xy;
+        float2 minP = min(min(p1, p2), p3), maxP = max(max(p1, p2), p3);
+        pixelPos = minP + input.quadPos * (maxP - minP);
+        output.p1 = p1; output.p2 = p2; output.p3 = p3;
+    } else if (type == 8) { 
+        float2 a = instance.pos, b = instance.size;
+        float2 minP = min(a, b) - 5.0, maxP = max(a, b) + 5.0;
+        pixelPos = minP + input.quadPos * (maxP - minP);
+        output.p1 = a; output.p2 = b; output.p3 = 0;
+    } else {
+        pixelPos = instance.pos + input.quadPos * instance.size;
+        output.p1 = 0; output.p2 = 0; output.p3 = 0;
     }
-)";
+    output.pos = mul(float4(pixelPos, 0, 1), transform);
+    output.color = instance.color;
+    output.localPos = input.quadPos * 2.0 - 1.0;
+    output.params = instance.params;
+    output.pixelPos = pixelPos;
+    return output;
+}
 
-// Instanced vertex shader with pixel-perfect coordinates and alpha
-const char* VS_INSTANCED_SRC = R"(
-    struct VS_INPUT {
-        float2 quadPos : POSITION;
-    };
-    struct VS_INSTANCE {
-        float2 pos : INSTANCE_POS;
-        float2 size : INSTANCE_SIZE;
-        float4 color : INSTANCE_COLOR;
-    };
-    struct VS_OUTPUT {
-        float4 pos : SV_POSITION;
-        float4 color : COLOR;
-    };
-    cbuffer ScreenCB : register(b0) {
-        float2 screenSize;
-    };
-    VS_OUTPUT main(VS_INPUT input, VS_INSTANCE instance) {
-        VS_OUTPUT output;
-        // Java2D-compatible coordinates: Top-Left origin, Y-down
-        float2 pixelPos = instance.pos + input.quadPos * instance.size;
-        
-        // Convert pixel coordinates to clip space
-        // Java2D: (0,0) = Top-Left, (width,height) = Bottom-Right
-        // DirectX: (-1,-1) = Bottom-Left, (1,1) = Top-Right
-        
-        float2 clipPos;
-        // X: [0, width] -> [-1, 1], pixel-center offset
-        clipPos.x = ((pixelPos.x + 0.5) / screenSize.x) * 2.0 - 1.0;
-        // Y: [0, height] -> [1, -1] (flip for Top-Left origin), pixel-center offset  
-        clipPos.y = 1.0 - ((pixelPos.y + 0.5) / screenSize.y) * 2.0;
-        
-        output.pos = float4(clipPos, 0.0, 1.0);
-        output.color = instance.color;
-        return output;
+float4 ps_main(PS_INPUT input) : SV_Target {
+    float type = floor(input.params.z + 0.5);
+    float p1 = input.params.x; 
+    float p2 = input.params.y;
+    float p3 = input.params.w;
+    
+    if (type == 9) {
+        float2 uv = input.localPos * 0.5 + 0.5;
+        return tex.Sample(smp, uv) * input.color;
     }
-)";
 
-const char* PS_SRC = R"(
-    struct PS_INPUT {
-        float4 pos : SV_POSITION;
-        float4 color : COLOR;
-    };
-    float4 main(PS_INPUT input) : SV_TARGET {
+    float d = 0, th = 0;
+    if (type == 0 || type == 2) { 
+        d = sdRoundRect(input.localPos, float2(1,1), p1);
+        th = (type == 2) ? p2 * 2.0 : 0;
+    } else if (type == 1 || type == 3) { 
+        d = sdRoundRect(input.localPos, float2(1,1), 1.0);
+        th = (type == 3) ? p2 * 2.0 : 0;
+    } else if (type == 4 || type == 5) {
+        float2 lp = input.localPos;
+        float dist = length(lp);
+        
+        // Use a more stable angle calculation for 0-360 range
+        float angle = degrees(atan2(-lp.y, lp.x));
+        if (angle < 0) angle += 360.0f;
+        angle = fmod(angle, 360.0f);
+        
+        float start = p1, extent = p2;
+        bool inside = (abs(extent) >= 360.0f);
+        if (!inside) {
+            float s = fmod(start, 360.0f); if (s < 0) s += 360.0f;
+            float e = fmod(start + extent, 360.0f); if (e < 0) e += 360.0f;
+            
+            // For negative sweep, we are looking for the space BETWEEN e and s
+            if (extent > 0) {
+                if (s <= e) inside = (angle >= s && angle <= e);
+                else inside = (angle >= s || angle <= e);
+            } else {
+                if (e <= s) inside = (angle >= e && angle <= s);
+                else inside = (angle >= e || angle <= s);
+            }
+        }
+        
+        if (!inside) discard;
+        d = dist - 1.0;
+        th = (type == 5) ? p3 * 2.0f : 0.0f;
+    } else if (type == 6 || type == 7) { 
+        d = sdTriangle(input.pixelPos, input.p1, input.p2, input.p3);
+        th = (type == 7) ? p3 : 0;
+    } else if (type == 8) {
+        float2 ba = input.p2 - input.p1;
+        float2 pa = input.pixelPos - input.p1;
+        float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+        d = length(pa - ba * h);
+        if (d > p1 * 0.5) discard;
         return input.color;
     }
-)";
-
-// Textured shaders for image rendering
-const char* VS_TEXTURED_SRC = R"(
-    struct VS_INPUT {
-        float2 pos : POSITION;
-        float2 uv : TEXCOORD;
-    };
-    struct VS_OUTPUT {
-        float4 pos : SV_POSITION;
-        float2 uv : TEXCOORD;
-    };
-    cbuffer ScreenCB : register(b0) {
-        float2 screenSize;
-    };
-    VS_OUTPUT main(VS_INPUT input) {
-        VS_OUTPUT output;
-        float2 pixelPos = input.pos;
-        float2 clipPos;
-        clipPos.x = ((pixelPos.x + 0.5) / screenSize.x) * 2.0 - 1.0;
-        clipPos.y = 1.0 - ((pixelPos.y + 0.5) / screenSize.y) * 2.0;
-        output.pos = float4(clipPos, 0.0, 1.0);
-        output.uv = input.uv;
-        return output;
-    }
-)";
-
-const char* PS_TEXTURED_SRC = R"(
-    struct PS_INPUT {
-        float4 pos : SV_POSITION;
-        float2 uv : TEXCOORD;
-    };
-    Texture2D tex : register(t0);
-    SamplerState samp : register(s0);
-    float4 main(PS_INPUT input) : SV_TARGET {
-        return tex.Sample(samp, input.uv);
-    }
-)";
-
-bool CompileShader(const char* src, const char* entry, const char* target, ID3DBlob** blob) {
-    ID3DBlob* err = nullptr;
-    if (FAILED(D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, target, 0, 0, blob, &err))) {
-        if (err) err->Release();
-        return false;
-    }
-    return true;
-}
-
-// UI Scale for High DPI displays (1.0 = 100%, 2.0 = 200%)
-static float g_uiScale = 1.0f;
-
-float ToNDC_X(float x, float w) { return ((x * g_uiScale) / w) * 2.0f - 1.0f; }
-float ToNDC_Y(float y, float h) { return 1.0f - ((y * g_uiScale) / h) * 2.0f; }
-
-// Transformation state
-static float g_translateX = 0.0f;
-static float g_translateY = 0.0f;
-static float g_scaleX = 1.0f;
-static float g_scaleY = 1.0f;
-static float g_rotation = 0.0f;
-
-// Line width
-static float g_lineWidth = 1.0f;
-
-// Clipping state
-static float g_clipX = 0.0f;
-static float g_clipY = 0.0f;
-static float g_clipW = 0.0f;
-static float g_clipH = 0.0f;
-static bool g_clipEnabled = false;
-
-// Cached rasterizer states for clipping
-static ID3D11RasterizerState* g_rsScissorEnabled = nullptr;
-static ID3D11RasterizerState* g_rsScissorDisabled = nullptr;
-
-// Apply transformation to point
-static void ApplyTransform(float* x, float* y) {
-    *x *= g_scaleX;
-    *y *= g_scaleY;
     
-    if (g_rotation != 0.0f) {
-        float rad = g_rotation * 3.14159265f / 180.0f;
-        float cosr = cosf(rad);
-        float sinr = sinf(rad);
-        float newX = *x * cosr - *y * sinr;
-        float newY = *x * sinr + *y * cosr;
-        *x = newX;
-        *y = newY;
+    float alpha = 1.0;
+    if (smoothness > 0) {
+        float fw = fwidth(d);
+        float d_pixel = d / fw;
+        float th_pixel = th / fw;
+        if (th > 0) {
+            alpha = saturate(0.5 - d_pixel) * saturate(0.5 + (d_pixel + th_pixel));
+        } else {
+            alpha = saturate(0.5 - d_pixel);
+        }
+    } else {
+        if (th > 0) {
+            if (d > 0 || d < -th) discard;
+        } else {
+            if (d > 0) discard;
+        }
     }
     
-    *x += g_translateX;
-    *y += g_translateY;
+    return float4(input.color.rgb, input.color.a * alpha);
 }
-
-// Apply current clipping state before drawing
-static void ApplyClipState() {
-    printf("[ApplyClipState] g_clipEnabled=%s, g_rsScissorEnabled=%p, g_rsScissorDisabled=%p\n", 
-           g_clipEnabled ? "TRUE" : "FALSE",
-           g_rsScissorEnabled, g_rsScissorDisabled);
-    if (g_clipEnabled && g_rsScissorEnabled) {
-        g_context->RSSetState(g_rsScissorEnabled);
-        printf("[Clip] ENABLED, scissor state set\n");
-    } else if (!g_clipEnabled && g_rsScissorDisabled) {
-        g_context->RSSetState(g_rsScissorDisabled);
-        printf("[Clip] DISABLED\n");
-    }
-}
+)";
 
 extern "C" {
 
-JNIEXPORT void JNICALL Java_demo_DemoApp_init(JNIEnv*, jclass, jlong hwnd) {
-    fprintf(stderr, "[FastGraphics] DemoApp_init: hwnd=%lld\n", hwnd);
-    HWND h = (HWND)hwnd;
-    fprintf(stderr, "[FastGraphics] DemoApp_init: calling GetClientRect...\n");
-    RECT rc; 
-    if (!GetClientRect(h, &rc)) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: GetClientRect FAILED!\n");
-        return;
-    }
-    int w = rc.right - rc.left, h2 = rc.bottom - rc.top;
-    fprintf(stderr, "[FastGraphics] DemoApp_init: client size %dx%d\n", w, h2);
-    
-    DXGI_SWAP_CHAIN_DESC sd = {};
-    sd.BufferCount = 1;
-    sd.BufferDesc.Width = w; sd.BufferDesc.Height = h2;
-    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferDesc.RefreshRate.Numerator = 60;
-    sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = h;
-    sd.SampleDesc.Count = 1;
-    sd.SampleDesc.Quality = 0;
-    sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    
-    fprintf(stderr, "[FastGraphics] DemoApp_init: creating D3D11 device...\n");
-    auto fl = D3D_FEATURE_LEVEL_11_0;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        &fl, 1, D3D11_SDK_VERSION, &sd,
-        &g_swapChain, &g_device, nullptr, &g_context);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: D3D11CreateDeviceAndSwapChain FAILED! hr=0x%08X\n", hr);
-        return;
-    }
-    fprintf(stderr, "[FastGraphics] DemoApp_init: D3D11 device created OK\n");
-    
-    ID3D11Texture2D* backBuffer = nullptr;
-    fprintf(stderr, "[FastGraphics] DemoApp_init: getting backbuffer...\n");
-    HRESULT hr2 = g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
-    if (FAILED(hr2) || !backBuffer) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: GetBuffer FAILED! hr=0x%08X, backBuffer=%p\n", hr2, backBuffer);
-        return;
-    }
-    fprintf(stderr, "[FastGraphics] DemoApp_init: got backbuffer OK\n");
-    fprintf(stderr, "[FastGraphics] DemoApp_init: creating RTV...\n");
-    if (!g_device) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: ERROR g_device is null!\n");
-        return;
-    }
-    HRESULT hr3 = g_device->CreateRenderTargetView(backBuffer, nullptr, &g_rtv);
-    if (FAILED(hr3)) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: CreateRenderTargetView FAILED! hr=0x%08X\n", hr3);
-        backBuffer->Release();
-        return;
-    }
-    fprintf(stderr, "[FastGraphics] DemoApp_init: RTV created OK\n");
-    backBuffer->Release();
-    
-    fprintf(stderr, "[FastGraphics] DemoApp_init: setting viewport...\n");
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (FLOAT)w;
-    vp.Height = (FLOAT)h2;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    vp.TopLeftX = 0;
-    vp.TopLeftY = 0;
-    g_context->RSSetViewports(1, &vp);
-    fprintf(stderr, "[FastGraphics] DemoApp_init: viewport set OK\n");
-    
-    // Create cached rasterizer states for clipping
-    fprintf(stderr, "[FastGraphics] DemoApp_init: creating rasterizer states...\n");
-    D3D11_RASTERIZER_DESC rsDesc = {};
-    rsDesc.FillMode = D3D11_FILL_SOLID;
-    rsDesc.CullMode = D3D11_CULL_BACK;
-    rsDesc.FrontCounterClockwise = TRUE;
-    rsDesc.DepthClipEnable = TRUE;
-    rsDesc.ScissorEnable = FALSE;
-    
-    // Create default state (scissor disabled)
-    g_device->CreateRasterizerState(&rsDesc, &g_rsScissorDisabled);
-    if (g_rsScissorDisabled) {
-        g_context->RSSetState(g_rsScissorDisabled);
-        fprintf(stderr, "[FastGraphics] DemoApp_init: default rasterizer state created\n");
-    }
-    
-    // Create scissor-enabled state
-    rsDesc.ScissorEnable = TRUE;
-    g_device->CreateRasterizerState(&rsDesc, &g_rsScissorEnabled);
-    if (g_rsScissorEnabled) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: scissor rasterizer state created\n");
-    }
-    
-    fprintf(stderr, "[FastGraphics] DemoApp_init: compiling shaders...\n");
-    ID3D10Blob* vsBlob = nullptr, * psBlob = nullptr;
-    if (!CompileShader(VS_SRC, "main", "vs_4_0", &vsBlob)) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: VS compile FAILED!\n");
-        return;
-    }
-    fprintf(stderr, "[FastGraphics] DemoApp_init: VS compiled OK\n");
-    if (!CompileShader(PS_SRC, "main", "ps_4_0", &psBlob)) {
-        fprintf(stderr, "[FastGraphics] DemoApp_init: PS compile FAILED!\n");
-        vsBlob->Release();
-        return;
-    }
-    fprintf(stderr, "[FastGraphics] DemoApp_init: PS compiled OK\n");
-    g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs);
-    g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps);
-    
-    // Input layout for standard shader (position + color with alpha)
-    D3D11_INPUT_ELEMENT_DESC ied[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 }
-    };
-    g_device->CreateInputLayout(ied, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layout);
-    
-    // Enable alpha blending
-    D3D11_BLEND_DESC blendDesc = {};
-    blendDesc.RenderTarget[0].BlendEnable = TRUE;
-    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    ID3D11BlendState* blendState = nullptr;
-    g_device->CreateBlendState(&blendDesc, &blendState);
-    if (blendState) {
-        g_context->OMSetBlendState(blendState, nullptr, 0xFFFFFFFF);
-        blendState->Release();
-    }
-    
-    vsBlob->Release();
-    psBlob->Release();
-    
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    D3D11_VIEWPORT vp2 = { 0, 0, (float)w, (float)h2, 0, 1 };
-    g_context->RSSetViewports(1, &vp2);
-}
-
-JNIEXPORT void JNICALL Java_demo_DemoApp_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    if (g_context && g_rtv) {
-        float clear[4] = { r, g, b, 1.0f };
-        g_context->ClearRenderTargetView(g_rtv, clear);
-        g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    }
-}
-
-JNIEXPORT void JNICALL Java_demo_DemoApp_present(JNIEnv*, jclass) {
-    if (g_swapChain) g_swapChain->Present(0, 0);
-}
-
-// renderBatch implementation for FastGraphics2D
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_renderBatch(JNIEnv* env, jclass, jfloatArray vertices, jint count) {
-    if (!g_device || !g_context || !g_rtv) return;
-    
-    jfloat* verts = env->GetFloatArrayElements(vertices, nullptr);
-    if (!verts) return;
-    
-    // Set render target
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    
-    // Create/update vertex buffer
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = count * 6 * sizeof(float); // count vertices * 6 floats (x,y,r,g,b,a)
-    bd.Usage = D3D11_USAGE_DEFAULT;
-    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA sd = { verts };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    
-    env->ReleaseFloatArrayElements(vertices, verts, JNI_ABORT);
-    
-    // Setup input layout and shaders
-    g_context->IASetInputLayout(g_layout);
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    
-    // Apply clipping state
-    ApplyClipState();
-    
-    // Set vertex buffer
-    UINT stride = 6 * sizeof(float);
-    UINT offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    
-    // Draw
-    g_context->Draw(count, 0);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_DemoApp_findWindow(JNIEnv* env, jclass, jstring title) {
-    const char* str = nullptr;
-    if (title) str = env->GetStringUTFChars(title, nullptr);
-    HWND hwnd = FindWindowA(nullptr, str);
-    if (title && str) env->ReleaseStringUTFChars(title, str);
+JNIEXPORT jlong JNICALL Java_fastgraphics_FastGraphicsEngine_findWindow(JNIEnv* env, jclass, jstring title) {
+    const char* str = env->GetStringUTFChars(title, NULL);
+    HWND hwnd = FindWindowA(NULL, str);
+    env->ReleaseStringUTFChars(title, str);
     return (jlong)hwnd;
 }
 
-// Batch rendering with instanced rendering
+JNIEXPORT jlong JNICALL Java_fastgraphics_FastGraphicsEngine_findCanvas(JNIEnv* env, jclass, jlong parent) {
+    return (jlong)FindWindowExA((HWND)parent, NULL, "SunAwtCanvas", NULL);
+}
 
-static ID3D11Buffer* g_batchVB = nullptr;
-static size_t g_batchVBSize = 0;
-static const size_t MAX_BATCH_RECTS = 100000;
+JNIEXPORT jboolean JNICALL Java_fastgraphics_FastGraphicsEngine_init(JNIEnv* env, jobject, jlong hwnd) {
+    g_hwnd = (HWND)hwnd;
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = g_hwnd;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-// Vertex ring buffer (fallback)
-static float g_vertexRingBuffer[MAX_BATCH_RECTS * 6 * 5];
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, flags, NULL, 0, D3D11_SDK_VERSION, &sd, &g_swapChain, &g_device, NULL, &g_context);
+    if (FAILED(hr)) { printf("D3D11 Error: 0x%08X\n", hr); return JNI_FALSE; }
 
-// Instanced rendering
-static ID3D11Buffer* g_quadVB = nullptr;
-static ID3D11Buffer* g_instanceVB = nullptr;
-static ID3D11Buffer* g_screenCB = nullptr;
-static ID3D11VertexShader* g_vsInstanced = nullptr;
-static ID3D11InputLayout* g_layoutInstanced = nullptr;
-static size_t g_instanceVBSize = 0;
-
-// Instance data: x, y, w, h, r, g, b, a (8 floats)
-static float g_instanceData[MAX_BATCH_RECTS * 8];
-
-// Static quad (0,0 to 1,1)
-static float g_quadVertices[] = {
-    0.0f, 0.0f,
-    1.0f, 0.0f,
-    0.0f, 1.0f,
-    1.0f, 1.0f
-};
-
-// Instanced batch rendering
-
-JNIEXPORT void JNICALL Java_demo_DemoApp_fillRects(JNIEnv* env, jclass, 
-    jobject rectDataBuffer, jint count) {
-    if (!g_device || count == 0) return;
-    if (count > (int)MAX_BATCH_RECTS) count = (int)MAX_BATCH_RECTS;
+    ID3D11Texture2D* bb = nullptr; 
+    hr = g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
+    if (FAILED(hr)) { printf("GetBuffer Error: 0x%08X\n", hr); return JNI_FALSE; }
     
-    // Get direct buffer address
-    float* rects = (float*)env->GetDirectBufferAddress(rectDataBuffer);
-    if (!rects) return;
-    
-    D3D11_VIEWPORT vp; UINT num = 1;
-    if (g_context) g_context->RSGetViewports(&num, &vp);
-    float vw = (float)vp.Width;
-    float vh = (float)vp.Height;
-    
-    // Instanced rendering setup (one-time)
-    if (!g_quadVB) {
-        // Create quad buffer (static)
-        D3D11_BUFFER_DESC qbd = {};
-        qbd.Usage = D3D11_USAGE_IMMUTABLE;
-        qbd.ByteWidth = sizeof(g_quadVertices);
-        qbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA qsd = { g_quadVertices };
-        g_device->CreateBuffer(&qbd, &qsd, &g_quadVB);
-        
-        // Compile instanced shader
-        ID3DBlob* vsBlob = nullptr;
-        if (CompileShader(VS_INSTANCED_SRC, "main", "vs_4_0", &vsBlob)) {
-            g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vsInstanced);
-            
-            // Input layout for instanced rendering with alpha
-            D3D11_INPUT_ELEMENT_DESC layout[] = {
-                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-                { "INSTANCE_POS", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
-                { "INSTANCE_SIZE", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 8, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
-                { "INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 }
-            };
-            g_device->CreateInputLayout(layout, 4, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layoutInstanced);
-            vsBlob->Release();
-        }
-        
-        // Create screen constant buffer
-        D3D11_BUFFER_DESC cbd = {};
-        cbd.Usage = D3D11_USAGE_DYNAMIC;
-        cbd.ByteWidth = 16;
-        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        g_device->CreateBuffer(&cbd, nullptr, &g_screenCB);
+    hr = g_device->CreateRenderTargetView(bb, NULL, &g_rtv);
+    if (FAILED(hr)) { bb->Release(); printf("CreateRTV Error: 0x%08X\n", hr); return JNI_FALSE; }
+
+    ID3DBlob* vsBlob = nullptr, * psBlob = nullptr, * errorBlob = nullptr;
+    HRESULT hr_vs = D3DCompile(SHADER_SRC, strlen(SHADER_SRC), NULL, NULL, NULL, "vs_main", "vs_4_0", 0, 0, &vsBlob, &errorBlob);
+    if (FAILED(hr_vs)) {
+        if (errorBlob) { printf("VS Error: %s\n", (char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+        bb->Release(); return JNI_FALSE;
     }
-    
-    // Prepare instance data (8 floats per instance: x, y, w, h, r, g, b, a)
-    size_t instanceDataSize = count * 8 * sizeof(float);
-    memcpy(g_instanceData, rects, instanceDataSize);
-    
-    // Persistent instance buffer
-    if (!g_instanceVB || instanceDataSize > g_instanceVBSize) {
-        if (g_instanceVB) g_instanceVB->Release();
-        g_instanceVBSize = instanceDataSize;
-        
-        D3D11_BUFFER_DESC ibd = {};
-        ibd.Usage = D3D11_USAGE_DYNAMIC;
-        ibd.ByteWidth = instanceDataSize;
-        ibd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        ibd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        g_device->CreateBuffer(&ibd, nullptr, &g_instanceVB);
+    hr = g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), NULL, &g_vs);
+    if (FAILED(hr)) { vsBlob->Release(); bb->Release(); return JNI_FALSE; }
+
+    HRESULT hr_ps = D3DCompile(SHADER_SRC, strlen(SHADER_SRC), NULL, NULL, NULL, "ps_main", "ps_4_0", 0, 0, &psBlob, &errorBlob);
+    if (FAILED(hr_ps)) {
+        if (errorBlob) { printf("PS Error: %s\n", (char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+        vsBlob->Release(); bb->Release(); return JNI_FALSE;
     }
+    hr = g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), NULL, &g_ps);
+    if (FAILED(hr)) { vsBlob->Release(); psBlob->Release(); bb->Release(); return JNI_FALSE; }
+
+    D3D11_INPUT_ELEMENT_DESC ied[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"I_POS", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"I_SIZE", 0, DXGI_FORMAT_R32G32_FLOAT, 1, 8, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"I_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"I_PARAMS", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1}
+    };
+    hr = g_device->CreateInputLayout(ied, 6, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layout);
+    vsBlob->Release(); psBlob->Release();
+    if (FAILED(hr)) { bb->Release(); return JNI_FALSE; }
+
+    float quad[] = { 0,0, 1,0, 0,1, 1,1 };
+    D3D11_BUFFER_DESC qbd = { sizeof(quad), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER };
+    D3D11_SUBRESOURCE_DATA qsd = { quad };
+    hr = g_device->CreateBuffer(&qbd, &qsd, &g_quadVB);
+    if (FAILED(hr)) { bb->Release(); return JNI_FALSE; }
+
+    D3D11_BUFFER_DESC ibd = { sizeof(InstanceData) * MAX_INSTANCES, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE };
+    hr = g_device->CreateBuffer(&ibd, NULL, &g_instanceVB);
+    if (FAILED(hr)) { bb->Release(); return JNI_FALSE; }
+
+    D3D11_BUFFER_DESC cbd = { sizeof(ConstantBuffer), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE };
+    hr = g_device->CreateBuffer(&cbd, NULL, &g_cb);
+    if (FAILED(hr)) { bb->Release(); return JNI_FALSE; }
+
+    D3D11_BLEND_DESC bld = {};
+    bld.RenderTarget[0].BlendEnable = TRUE;
+    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    bld.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    bld.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    bld.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    hr = g_device->CreateBlendState(&bld, &g_bsAlpha);
+    if (FAILED(hr)) { bb->Release(); return JNI_FALSE; }
+
+    D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE;
+    hr = g_device->CreateRasterizerState(&rd, &g_rs);
+    if (FAILED(hr)) { bb->Release(); return JNI_FALSE; }
+
+    D3D11_SAMPLER_DESC sd_smp = {};
+    sd_smp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd_smp.AddressU = sd_smp.AddressV = sd_smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd_smp.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sd_smp.MaxLOD = D3D11_FLOAT32_MAX;
+    g_device->CreateSamplerState(&sd_smp, &g_samplerLinear);
+    sd_smp.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    g_device->CreateSamplerState(&sd_smp, &g_samplerPoint);
+
+    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), (void**)&g_d2dFactory);
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&g_dwFactory);
+
+    IDXGIDevice* dxgiDevice;
+    g_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
+    ID2D1Device* d2dDevice;
+    g_d2dFactory->CreateDevice(dxgiDevice, &d2dDevice);
+    d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &g_d2dContext);
+    g_d2dContext->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &g_textBrush);
+
+    IDXGISurface* surf;
+    bb->QueryInterface(__uuidof(IDXGISurface), (void**)&surf);
+    ID2D1Bitmap1* target;
+    g_d2dContext->CreateBitmapFromDxgiSurface(surf, NULL, &target);
+    g_d2dContext->SetTarget(target);
+
+    target->Release(); surf->Release(); bb->Release();
+    d2dDevice->Release(); dxgiDevice->Release();
     
-    // Map instance data
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(g_context->Map(g_instanceVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        memcpy(mapped.pData, g_instanceData, instanceDataSize);
-        g_context->Unmap(g_instanceVB, 0);
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_destroy(JNIEnv*, jobject) {
+    if (g_textBrush) g_textBrush->Release();
+    if (g_d2dContext) g_d2dContext->Release();
+    if (g_dwFactory) g_dwFactory->Release();
+    if (g_d2dFactory) g_d2dFactory->Release();
+    if (g_samplerLinear) g_samplerLinear->Release();
+    if (g_samplerPoint) g_samplerPoint->Release();
+    if (g_bsAlpha) g_bsAlpha->Release();
+    if (g_rs) g_rs->Release();
+    if (g_layout) g_layout->Release();
+    if (g_ps) g_ps->Release();
+    if (g_vs) g_vs->Release();
+    if (g_instanceVB) g_instanceVB->Release();
+    if (g_quadVB) g_quadVB->Release();
+    if (g_cb) g_cb->Release();
+    if (g_rtv) g_rtv->Release();
+    if (g_swapChain) g_swapChain->Release();
+    if (g_context) g_context->Release();
+    if (g_device) g_device->Release();
+    
+    g_textBrush = nullptr; g_d2dContext = nullptr; g_dwFactory = nullptr; g_d2dFactory = nullptr;
+    g_samplerLinear = nullptr; g_samplerPoint = nullptr; g_bsAlpha = nullptr; g_rs = nullptr;
+    g_layout = nullptr; g_ps = nullptr; g_vs = nullptr; g_instanceVB = nullptr;
+    g_quadVB = nullptr; g_cb = nullptr; g_rtv = nullptr; g_swapChain = nullptr;
+    g_context = nullptr; g_device = nullptr;
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_clear(JNIEnv*, jobject, jfloat r, jfloat g, jfloat b, jfloat a) {
+    float color[4] = { r, g, b, a };
+    g_context->ClearRenderTargetView(g_rtv, color);
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_setAntialiasing(JNIEnv*, jobject, jboolean enabled) {
+    g_aaEnabled = (bool)enabled;
+    if (g_d2dContext) {
+        g_d2dContext->SetTextAntialiasMode(g_aaEnabled ? D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE : D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
     }
-    
-    // Update screen constant buffer
-    if (SUCCEEDED(g_context->Map(g_screenCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        float* cbData = (float*)mapped.pData;
-        cbData[0] = vw;
-        cbData[1] = vh;
-        g_context->Unmap(g_screenCB, 0);
+}
+
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_render(JNIEnv* env, jobject, jobject buffer, jint count, jfloatArray transform) {
+    if (!g_context || count <= 0) return;
+    RECT rc; GetClientRect(g_hwnd, &rc);
+    int w = rc.right - rc.left; int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+
+    if (w != g_renderWidth || h != g_renderHeight) {
+        if (g_d2dContext) g_d2dContext->SetTarget(nullptr);
+        if (g_rtv) g_rtv->Release();
+        g_swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+        ID3D11Texture2D* bb; g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
+        g_device->CreateRenderTargetView(bb, NULL, &g_rtv);
+        IDXGISurface* surf; bb->QueryInterface(__uuidof(IDXGISurface), (void**)&surf);
+        ID2D1Bitmap1* target; g_d2dContext->CreateBitmapFromDxgiSurface(surf, NULL, &target);
+        g_d2dContext->SetTarget(target);
+        target->Release(); surf->Release(); bb->Release();
+        g_renderWidth = w; g_renderHeight = h;
     }
-    
-    // Instanced rendering
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    g_context->VSSetShader(g_vsInstanced, nullptr, 0);
-    g_context->VSSetConstantBuffers(0, 1, &g_screenCB);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layoutInstanced);
-    
-    // Bind vertex buffers (stride 8 for quad pos, 32 for instance data: 8 floats * 4 bytes)
-    ID3D11Buffer* buffers[] = { g_quadVB, g_instanceVB };
-    UINT strides[] = { 8, 32 };
-    UINT offsets[] = { 0, 0 };
-    g_context->IASetVertexBuffers(0, 2, buffers, strides, offsets);
+
+    jfloat* trans = env->GetFloatArrayElements(transform, NULL);
+    XMMATRIX user = XMLoadFloat4x4((XMFLOAT4X4*)trans);
+    XMMATRIX proj = XMMatrixOrthographicOffCenterLH(0, (float)w, (float)h, 0, 0, 1);
+    env->ReleaseFloatArrayElements(transform, trans, JNI_ABORT);
+
+    D3D11_MAPPED_SUBRESOURCE ms;
+    g_context->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
+    ConstantBuffer* cb = (ConstantBuffer*)ms.pData;
+    cb->transform = XMMatrixTranspose(user * proj);
+    cb->smoothness = g_aaEnabled ? 1.0f : 0.0f;
+    g_context->Unmap(g_cb, 0);
+
+    g_context->OMSetRenderTargets(1, &g_rtv, NULL);
+    D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
+    g_context->RSSetViewports(1, &vp);
+    g_context->RSSetState(g_rs);
+    g_context->OMSetBlendState(g_bsAlpha, NULL, 0xffffffff);
+    g_context->IASetInputLayout(g_layout);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    
-    // Draw 4 vertices per instance
+    UINT qstride = 8, stride = sizeof(InstanceData), offset = 0;
+    g_context->IASetVertexBuffers(0, 1, &g_quadVB, &qstride, &offset);
+    g_context->IASetVertexBuffers(1, 1, &g_instanceVB, &stride, &offset);
+    g_context->VSSetShader(g_vs, NULL, 0);
+    g_context->VSSetConstantBuffers(0, 1, &g_cb);
+    g_context->PSSetShader(g_ps, NULL, 0);
+    g_context->PSSetConstantBuffers(0, 1, &g_cb);
+    ID3D11SamplerState* samplers[] = { g_aaEnabled ? g_samplerLinear : g_samplerPoint };
+    g_context->PSSetSamplers(0, 1, samplers);
+    void* data = env->GetDirectBufferAddress(buffer);
+    g_context->Map(g_instanceVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
+    memcpy(ms.pData, data, count * sizeof(InstanceData));
+    g_context->Unmap(g_instanceVB, 0);
     g_context->DrawInstanced(4, count, 0, 0);
 }
 
-// Circle rendering
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_present(JNIEnv*, jobject) {
+    g_swapChain->Present(0, 0);
+}
 
-#ifndef D3D11_PRIMITIVE_TOPOLOGY_TRIANGLEFAN
-#define D3D11_PRIMITIVE_TOPOLOGY_TRIANGLEFAN 5
-#endif
-
-#ifndef D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP
-#define D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP 3
-#endif
-
-static ID3D11Buffer* g_circleVB = nullptr;
-
-JNIEXPORT void JNICALL Java_demo_DemoApp_drawCircles(JNIEnv* env, jclass,
-    jobject circleData, jint count) {
-    if (!g_device || count == 0) return;
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_drawString(JNIEnv* env, jobject, jstring text, jfloat x, jfloat y, jfloat size, jfloat r, jfloat g, jfloat b, jfloat a) {
+    const jchar* jstr = env->GetStringChars(text, NULL); jsize len = env->GetStringLength(text);
+    IDWriteTextFormat* format; g_dwFactory->CreateTextFormat(L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", &format);
     
-    // circleData: x, y, radius, r, g, b per circle (6 floats)
-    float* circles = (float*)env->GetDirectBufferAddress(circleData);
-    if (!circles) return;
-    
-    D3D11_VIEWPORT vp; UINT num = 1;
-    if (g_context) g_context->RSGetViewports(&num, &vp);
-    float vw = (float)vp.Width;
-    float vh = (float)vp.Height;
-    
-    const int segments = 64;
-    const int vertsPerCircle = segments + 1;
-    float* vertices = new float[count * vertsPerCircle * 5]; // x, y, r, g, b
-    
-    int vIdx = 0;
-    for (int i = 0; i < count; i++) {
-        float cx = circles[i * 6 + 0];
-        float cy = circles[i * 6 + 1];
-        float radius = circles[i * 6 + 2];
-        float cr = circles[i * 6 + 3];
-        float cg = circles[i * 6 + 4];
-        float cb = circles[i * 6 + 5];
-        
-        // Calculate circle edge points
-        for (int s = 0; s <= segments; s++) {
-            float angle = (float)s / segments * 3.14159265f * 2.0f;
-            float x = cx + radius * cosf(angle);
-            float y = cy + radius * sinf(angle);
-            
-            vertices[vIdx++] = ToNDC_X(x, vw);
-            vertices[vIdx++] = ToNDC_Y(y, vh);
-            vertices[vIdx++] = cr;
-            vertices[vIdx++] = cg;
-            vertices[vIdx++] = cb;
-        }
-    }
-    
-    // Create vertex buffer
-    size_t bufferSize = count * vertsPerCircle * 5 * sizeof(float);
-    if (g_circleVB) g_circleVB->Release();
-    
-    D3D11_BUFFER_DESC bd = {};
-    bd.Usage = D3D11_USAGE_DEFAULT;
-    bd.ByteWidth = bufferSize;
-    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_circleVB);
-    delete[] vertices;
-    
-    // Use standard shader
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    UINT stride = 20;
-    UINT offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_circleVB, &stride, &offset);
-    
-    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
-    
-    // Draw each circle individually (line strip)
-    for (int i = 0; i < count; i++) {
-        g_context->Draw(vertsPerCircle, i * vertsPerCircle);
-    }
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_clearNative(JNIEnv*, jclass, 
-    jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_presentNative(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_fastgraphics_FastGraphics2D_findWindowNative(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-
-    float x1 = ToNDC_X(x, vp.Width), y1 = ToNDC_Y(y, vp.Height);
-    float x2 = ToNDC_X(x + width, vp.Width), y2 = ToNDC_Y(y + height, vp.Height);
-
-    float vertices[] = {
-        x1, y1, r, g, b, a,
-        x2, y1, r, g, b, a,
-        x2, y2, r, g, b, a,
-        x1, y2, r, g, b, a,
-        x1, y1, r, g, b, a
-    };
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
-    g_context->Draw(5, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat width, jfloat height, jfloat r, jfloat g, jfloat b, jfloat a) {
-    static int callCount = 0;
-    callCount++;
-    if (callCount <= 5) {
-        printf("[fillRect] #%d: (%.0f,%.0f,%.0f,%.0f) color(%.2f,%.2f,%.2f)\n", callCount, x, y, width, height, r, g, b);
-    }
-    
-    if (!g_device) {
-        printf("[fillRect] ERROR: g_device is null!\n");
-        return;
-    }
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    // Apply transformation to corners
-    float corners[] = { x, y, x + width, y, x, y + height, x + width, y + height };
-    for (int i = 0; i < 8; i += 2) {
-        ApplyTransform(&corners[i], &corners[i + 1]);
-    }
-
-    float x1 = ToNDC_X(corners[0], vp.Width), y1 = ToNDC_Y(corners[1], vp.Height);
-    float x2 = ToNDC_X(corners[2], vp.Width), y2 = ToNDC_Y(corners[3], vp.Height);
-    float x3 = ToNDC_X(corners[4], vp.Width), y3 = ToNDC_Y(corners[5], vp.Height);
-    float x4 = ToNDC_X(corners[6], vp.Width), y4 = ToNDC_Y(corners[7], vp.Height);
-
-    float vertices[] = {
-        x1, y1, r, g, b, a,
-        x2, y2, r, g, b, a,
-        x3, y3, r, g, b, a,
-        x3, y3, r, g, b, a,
-        x2, y2, r, g, b, a,
-        x4, y4, r, g, b, a
-    };
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(6, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    float cx = x + w / 2.0f;
-    float cy = y + h / 2.0f;
-    float rx = w / 2.0f;
-    float ry = h / 2.0f;
-
-    const int segments = 64;
-    float* vertices = new float[segments * 3 * 6];
-
-    int idx = 0;
-    for (int i = 0; i < segments; i++) {
-        float angle1 = (float)i / segments * 3.14159265f * 2.0f;
-        float angle2 = (float)(i + 1) / segments * 3.14159265f * 2.0f;
-
-        // Center vertex
-        vertices[idx++] = ToNDC_X(cx, vp.Width);
-        vertices[idx++] = ToNDC_Y(cy, vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-
-        // Edge vertex 1
-        vertices[idx++] = ToNDC_X(cx + rx * cosf(angle1), vp.Width);
-        vertices[idx++] = ToNDC_Y(cy + ry * sinf(angle1), vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-
-        // Edge vertex 2
-        vertices[idx++] = ToNDC_X(cx + rx * cosf(angle2), vp.Width);
-        vertices[idx++] = ToNDC_Y(cy + ry * sinf(angle2), vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-    }
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { segments * 3 * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(segments * 3, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    float cx = x + w / 2.0f;
-    float cy = y + h / 2.0f;
-    float rx = w / 2.0f;
-    float ry = h / 2.0f;
-
-    const int segments = 64;
-    float* vertices = new float[(segments + 1) * 6];
-
-    int idx = 0;
-    for (int i = 0; i <= segments; i++) {
-        float angle = (float)i / segments * 3.14159265f * 2.0f;
-        float px = cx + rx * cosf(angle);
-        float py = cy + ry * sinf(angle);
-        vertices[idx++] = ToNDC_X(px, vp.Width);
-        vertices[idx++] = ToNDC_Y(py, vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-    }
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { (segments + 1) * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
-    g_context->Draw(segments + 1, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawLineNative(JNIEnv*, jclass,
-    jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    // Calculate perpendicular offset for thick lines
-    float dx = x2 - x1;
-    float dy = y2 - y1;
-    float len = sqrtf(dx * dx + dy * dy);
-
-    if (len < 0.0001f) {
-        // Zero-length line, draw a point
-        float nx = ToNDC_X(x1, vp.Width), ny = ToNDC_Y(y1, vp.Height);
-        float vertices[] = { nx, ny, r, g, b, a };
-        if (g_vb) g_vb->Release();
-        D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-        D3D11_SUBRESOURCE_DATA sd = { vertices };
-        g_device->CreateBuffer(&bd, &sd, &g_vb);
-        UINT stride = 24, offset = 0;
-        g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
-        g_context->Draw(1, 0);
-        return;
-    }
-
-    // Normal vector (perpendicular to line)
-    float nx = -dy / len;
-    float ny = dx / len;
-
-    // Half-width offset
-    float hw = g_lineWidth / 2.0f;
-    float ox = nx * hw;
-    float oy = ny * hw;
-
-    // Quad corners (2 triangles) - define in clockwise order for DirectX
-    // For a thick line, we create a rectangle perpendicular to the line
-    float x1a = x1 + ox, y1a = y1 + oy;  // start + offset
-    float x1b = x1 - ox, y1b = y1 - oy;  // start - offset
-    float x2a = x2 + ox, y2a = y2 + oy;  // end + offset
-    float x2b = x2 - ox, y2b = y2 - oy;  // end - offset
-
-    // Quad layout:
-    //   x1a,y1a -------- x2a,y2a
-    //      |                |
-    //   x1b,y1b -------- x2b,y2b
-    //
-    // Triangle 1 (CCW): x1a, x1b, x2a
-    // Triangle 2 (CCW): x1b, x2b, x2a
-    float vertices[] = {
-        // Triangle 1: top-left, bottom-left, top-right
-        ToNDC_X(x1a, vp.Width), ToNDC_Y(y1a, vp.Height), r, g, b, a,
-        ToNDC_X(x1b, vp.Width), ToNDC_Y(y1b, vp.Height), r, g, b, a,
-        ToNDC_X(x2a, vp.Width), ToNDC_Y(y2a, vp.Height), r, g, b, a,
-        // Triangle 2: bottom-left, bottom-right, top-right
-        ToNDC_X(x1b, vp.Width), ToNDC_Y(y1b, vp.Height), r, g, b, a,
-        ToNDC_X(x2b, vp.Width), ToNDC_Y(y2b, vp.Height), r, g, b, a,
-        ToNDC_X(x2a, vp.Width), ToNDC_Y(y2a, vp.Height), r, g, b, a
-    };
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(6, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawPolygonNative(JNIEnv* env, jclass,
-    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device || nPoints < 2) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    jfloat* xArr = env->GetFloatArrayElements(xPoints, nullptr);
-    jfloat* yArr = env->GetFloatArrayElements(yPoints, nullptr);
-
-    // Line strip with closing vertex
-    float* vertices = new float[(nPoints + 1) * 6];
-
-    int idx = 0;
-    for (int i = 0; i < nPoints; i++) {
-        vertices[idx++] = ToNDC_X(xArr[i], vp.Width);
-        vertices[idx++] = ToNDC_Y(yArr[i], vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-    }
-    vertices[idx++] = ToNDC_X(xArr[0], vp.Width);
-    vertices[idx++] = ToNDC_Y(yArr[0], vp.Height);
-    vertices[idx++] = r;
-    vertices[idx++] = g;
-    vertices[idx++] = b;
-    vertices[idx++] = a;
-
-    env->ReleaseFloatArrayElements(xPoints, xArr, JNI_ABORT);
-    env->ReleaseFloatArrayElements(yPoints, yArr, JNI_ABORT);
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { (nPoints + 1) * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
-    g_context->Draw(nPoints + 1, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillPolygonNative(JNIEnv* env, jclass,
-    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device || nPoints < 3) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    jfloat* xArr = env->GetFloatArrayElements(xPoints, nullptr);
-    jfloat* yArr = env->GetFloatArrayElements(yPoints, nullptr);
-
-    // Triangle list with fan triangulation
-    int numTriangles = nPoints - 2;
-    float* vertices = new float[numTriangles * 3 * 6];
-
-    int idx = 0;
-    for (int i = 1; i < nPoints - 1; i++) {
-        vertices[idx++] = ToNDC_X(xArr[0], vp.Width);
-        vertices[idx++] = ToNDC_Y(yArr[0], vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-
-        // Punkt i
-        vertices[idx++] = ToNDC_X(xArr[i], vp.Width);
-        vertices[idx++] = ToNDC_Y(yArr[i], vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-
-        vertices[idx++] = ToNDC_X(xArr[i + 1], vp.Width);
-        vertices[idx++] = ToNDC_Y(yArr[i + 1], vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-    }
-
-    env->ReleaseFloatArrayElements(xPoints, xArr, JNI_ABORT);
-    env->ReleaseFloatArrayElements(yPoints, yArr, JNI_ABORT);
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { numTriangles * 3 * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(numTriangles * 3, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawArcNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    float cx = x + w / 2.0f;
-    float cy = y + h / 2.0f;
-    float rx = w / 2.0f;
-    float ry = h / 2.0f;
-
-    const int segments = 64;
-    float startRad = startAngle * 3.14159265f / 180.0f;
-    float endRad = (startAngle + arcAngle) * 3.14159265f / 180.0f;
-    float* vertices = new float[segments * 6];
-
-    int idx = 0;
-    for (int i = 0; i < segments; i++) {
-        float t = (float)i / (segments - 1);
-        float angle = startRad + t * (endRad - startRad);
-        float px = cx + rx * cosf(angle);
-        float py = cy - ry * sinf(angle);
-        vertices[idx++] = ToNDC_X(px, vp.Width);
-        vertices[idx++] = ToNDC_Y(py, vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-    }
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { segments * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
-    g_context->Draw(segments, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillArcNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    float cx = x + w / 2.0f;
-    float cy = y + h / 2.0f;
-    float rx = w / 2.0f;
-    float ry = h / 2.0f;
-
-    const int segments = 64;
-    float startRad = startAngle * 3.14159265f / 180.0f;
-    float endRad = (startAngle + arcAngle) * 3.14159265f / 180.0f;
-    float* vertices = new float[segments * 3 * 6];
-
-    int idx = 0;
-    for (int i = 0; i < segments; i++) {
-        float t1 = (float)i / (segments - 1);
-        float t2 = (float)(i + 1) / (segments - 1);
-        float angle1 = startRad - t1 * (endRad - startRad);
-        float angle2 = startRad - t2 * (endRad - startRad);
-
-        // Center vertex
-        vertices[idx++] = ToNDC_X(cx, vp.Width);
-        vertices[idx++] = ToNDC_Y(cy, vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-
-        vertices[idx++] = ToNDC_X(cx + rx * cosf(angle1), vp.Width);
-        vertices[idx++] = ToNDC_Y(cy - ry * sinf(angle1), vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-
-        vertices[idx++] = ToNDC_X(cx + rx * cosf(angle2), vp.Width);
-        vertices[idx++] = ToNDC_Y(cy - ry * sinf(angle2), vp.Height);
-        vertices[idx++] = r;
-        vertices[idx++] = g;
-        vertices[idx++] = b;
-        vertices[idx++] = a;
-    }
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { segments * 3 * 6 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(segments * 3, 0);
-}
-
-// Helper to add a vertex with alpha
-static void AddVertex(float* verts, int& idx, float x, float y, float r, float g, float b, float a) {
-    verts[idx++] = x;
-    verts[idx++] = y;
-    verts[idx++] = r;
-    verts[idx++] = g;
-    verts[idx++] = b;
-    verts[idx++] = a;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawRoundRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    // Clamp arc dimensions
-    float aw = arcWidth / 2.0f;
-    float ah = arcHeight / 2.0f;
-    if (aw > w / 2.0f) aw = w / 2.0f;
-    if (ah > h / 2.0f) ah = h / 2.0f;
-
-    const int cornerSegments = 16;
-    // 4 corners with arcs + 4 straight lines connecting them
-    const int maxVerts = cornerSegments * 4 + 8;
-
-    float* vertices = new float[maxVerts * 6];
-    int idx = 0;
-
-    // Helper to add a point
-    auto addPoint = [&](float px, float py) {
-        AddVertex(vertices, idx, ToNDC_X(px, vp.Width), ToNDC_Y(py, vp.Height), r, g, b, a);
-    };
-
-    // Helper to add arc for a corner
-    auto addCornerArc = [&](float cx, float cy, float startAngle, float endAngle) {
-        for (int i = 0; i < cornerSegments; i++) {
-            float t = (float)i / (cornerSegments - 1);
-            float angle = startAngle + t * (endAngle - startAngle);
-            float px = cx + aw * cosf(angle);
-            float py = cy + ah * sinf(angle);
-            addPoint(px, py);
-        }
-    };
-
-    // Top-left corner (180 to 270 degrees)
-    addCornerArc(x + aw, y + ah, 3.14159265f, 3.14159265f * 1.5f);
-    // Top edge
-    addPoint(x + w - aw, y);
-    // Top-right corner (270 to 360 degrees)
-    addCornerArc(x + w - aw, y + ah, 3.14159265f * 1.5f, 3.14159265f * 2.0f);
-    // Right edge
-    addPoint(x + w, y + h - ah);
-    // Bottom-right corner (0 to 90 degrees)
-    addCornerArc(x + w - aw, y + h - ah, 0.0f, 3.14159265f * 0.5f);
-    // Bottom edge
-    addPoint(x + aw, y + h);
-    // Bottom-left corner (90 to 180 degrees)
-    addCornerArc(x + aw, y + h - ah, 3.14159265f * 0.5f, 3.14159265f);
-    // Left edge (back to start)
-    addPoint(x, y + ah);
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { (UINT)(idx * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
-    g_context->Draw(idx / 6, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_fillRoundRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b, jfloat a) {
-    if (!g_device) return;
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-    
-    // Apply clipping state
-    ApplyClipState();
-
-    // Clamp arc dimensions
-    float aw = arcWidth / 2.0f;
-    float ah = arcHeight / 2.0f;
-    if (aw > w / 2.0f) aw = w / 2.0f;
-    if (ah > h / 2.0f) ah = h / 2.0f;
-
-    const int cornerSegments = 16;
-    // Triangles needed:
-    // - 4 corners: each has cornerSegments triangles = 4 * 16 = 64
-    // - Center rect: 2 triangles
-    // - 4 side bars: each 2 triangles = 8
-    // Total: 74 triangles = 222 vertices
-    const int maxTriangles = cornerSegments * 4 + 10;
-
-    float* vertices = new float[maxTriangles * 3 * 6];
-    int idx = 0;
-
-    // Helper to add a triangle
-    auto addTri = [&](float x1, float y1, float x2, float y2, float x3, float y3) {
-        AddVertex(vertices, idx, ToNDC_X(x1, vp.Width), ToNDC_Y(y1, vp.Height), r, g, b, a);
-        AddVertex(vertices, idx, ToNDC_X(x2, vp.Width), ToNDC_Y(y2, vp.Height), r, g, b, a);
-        AddVertex(vertices, idx, ToNDC_X(x3, vp.Width), ToNDC_Y(y3, vp.Height), r, g, b, a);
-    };
-
-    // Define key points
-    float left = x, right = x + w, top = y, bottom = y + h;
-    float innerLeft = x + aw, innerRight = x + w - aw;
-    float innerTop = y + ah, innerBottom = y + h - ah;
-
-    // Helper to add corner fan - fan goes from inner corner point to arc edge
-    // Each corner fan creates triangles from inner corner to arc segments
-    auto addCorner = [&](float centerX, float centerY, float startAngle, float endAngle,
-                         float innerCornerX, float innerCornerY) {
-        for (int i = 0; i < cornerSegments; i++) {
-            float t1 = (float)i / cornerSegments;
-            float t2 = (float)(i + 1) / cornerSegments;
-            float angle1 = startAngle + t1 * (endAngle - startAngle);
-            float angle2 = startAngle + t2 * (endAngle - startAngle);
-
-            // Arc points on the outer edge
-            float ax1 = centerX + aw * cosf(angle1);
-            float ay1 = centerY + ah * sinf(angle1);
-            float ax2 = centerX + aw * cosf(angle2);
-            float ay2 = centerY + ah * sinf(angle2);
-
-            // Triangle: inner corner point -> arc point 1 -> arc point 2
-            addTri(innerCornerX, innerCornerY, ax1, ay1, ax2, ay2);
-        }
-    };
-
-    // Top-left corner: center at (innerLeft, innerTop), arc from 180° to 270°
-    // Inner corner connects to (innerLeft, innerTop)
-    addCorner(innerLeft, innerTop, 3.14159265f, 3.14159265f * 1.5f, innerLeft, innerTop);
-
-    // Top-right corner: center at (innerRight, innerTop), arc from 270° to 360°
-    addCorner(innerRight, innerTop, 3.14159265f * 1.5f, 3.14159265f * 2.0f, innerRight, innerTop);
-
-    // Bottom-right corner: center at (innerRight, innerBottom), arc from 0° to 90°
-    addCorner(innerRight, innerBottom, 0.0f, 3.14159265f * 0.5f, innerRight, innerBottom);
-
-    // Bottom-left corner: center at (innerLeft, innerBottom), arc from 90° to 180°
-    addCorner(innerLeft, innerBottom, 3.14159265f * 0.5f, 3.14159265f, innerLeft, innerBottom);
-
-    // Center rectangle (the inner area without corners)
-    addTri(innerLeft, innerTop, innerRight, innerTop, innerLeft, innerBottom);
-    addTri(innerRight, innerTop, innerRight, innerBottom, innerLeft, innerBottom);
-
-    // Top bar: from left inner edge to right inner edge, from top to inner top
-    // Rectangle: (innerLeft, top) -> (innerRight, innerTop)
-    addTri(innerLeft, top, innerRight, top, innerLeft, innerTop);
-    addTri(innerRight, top, innerRight, innerTop, innerLeft, innerTop);
-
-    // Bottom bar: (innerLeft, innerBottom) -> (innerRight, bottom)
-    addTri(innerLeft, innerBottom, innerRight, innerBottom, innerLeft, bottom);
-    addTri(innerRight, innerBottom, innerRight, bottom, innerLeft, bottom);
-
-    // Left bar: (left, innerTop) -> (innerLeft, innerBottom)
-    addTri(left, innerTop, innerLeft, innerTop, left, innerBottom);
-    addTri(innerLeft, innerTop, innerLeft, innerBottom, left, innerBottom);
-
-    // Right bar: (innerRight, innerTop) -> (right, innerBottom)
-    addTri(innerRight, innerTop, right, innerTop, innerRight, innerBottom);
-    addTri(right, innerTop, right, innerBottom, innerRight, innerBottom);
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { (UINT)(idx * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-    delete[] vertices;
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(idx / 6, 0);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_translateNative(JNIEnv*, jclass, jfloat tx, jfloat ty) {
-    g_translateX += tx;
-    g_translateY += ty;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_scaleNative(JNIEnv*, jclass, jfloat sx, jfloat sy) {
-    g_scaleX *= sx;
-    g_scaleY *= sy;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_rotateNative(JNIEnv*, jclass, jfloat angle) {
-    g_rotation += angle;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_resetTransformNative(JNIEnv*, jclass) {
-    g_translateX = 0.0f;
-    g_translateY = 0.0f;
-    g_scaleX = 1.0f;
-    g_scaleY = 1.0f;
-    g_rotation = 0.0f;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setUIScaleNative(JNIEnv*, jclass, jfloat scale) {
-    g_uiScale = scale;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setStrokeNative(JNIEnv*, jclass, jfloat lineWidth) {
-    g_lineWidth = lineWidth;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setAntiAliasingNative(JNIEnv*, jclass, jboolean enabled) {
-    // Stub: anti-aliasing not supported (requires MSAA in swap chain)
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_setClipNative(JNIEnv*, jclass, jfloat x, jfloat y, jfloat w, jfloat h) {
-    printf("[setClipNative] CALLED with (%.0f, %.0f, %.0f, %.0f)\n", x, y, w, h);
-    fflush(stdout);
-    
-    if (!g_context) {
-        printf("[setClipNative] ERROR: g_context is null!\n");
-        return;
-    }
-
-    // Store clip values for reference
-    g_clipX = x; g_clipY = y; g_clipW = w; g_clipH = h;
-    g_clipEnabled = true;
-    printf("[setClipNative] g_clipEnabled set to TRUE\n");
-
-    // Get viewport to calculate proper scissor rect in pixels
-    D3D11_VIEWPORT vp;
-    UINT num = 1;
-    g_context->RSGetViewports(&num, &vp);
-
-    // Convert from screen coordinates to pixel coordinates
-    // DirectX scissor rects are in pixel coordinates (top-left origin, Y goes down)
-    // Our screen coords have Y from top-left, so we just scale by UI scale
-    long left = (long)(x * g_uiScale);
-    long top = (long)(y * g_uiScale);
-    long right = (long)((x + w) * g_uiScale);
-    long bottom = (long)((y + h) * g_uiScale);
-
-    // Clamp to viewport bounds
-    if (left < 0) left = 0;
-    if (top < 0) top = 0;
-    if (right > (long)vp.Width) right = (long)vp.Width;
-    if (bottom > (long)vp.Height) bottom = (long)vp.Height;
-
-    // Set scissor rect (in pixel coordinates)
-    D3D11_RECT scissorRect = { left, top, right, bottom };
-    g_context->RSSetScissorRects(1, &scissorRect);
-
-    // Enable scissor test using cached rasterizer state
-    if (g_rsScissorEnabled) {
-        g_context->RSSetState(g_rsScissorEnabled);
-    }
-    
-    printf("[setClip] uiScale=%.2f, screen(%.0f,%.0f,%.0f,%.0f) -> pixels(%ld,%ld,%ld,%ld), vp(%.0f,%.0f)\n",
-           g_uiScale, x, y, w, h, left, top, right, bottom, vp.Width, vp.Height);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_resetClipNative(JNIEnv*, jclass) {
-    if (!g_context) return;
-
-    g_clipEnabled = false;
-
-    // Reset scissor rect to full viewport
-    D3D11_VIEWPORT vp;
-    UINT num = 1;
-    g_context->RSGetViewports(&num, &vp);
-
-    D3D11_RECT scissorRect = { 0, 0, (long)vp.Width, (long)vp.Height };
-    g_context->RSSetScissorRects(1, &scissorRect);
-
-    // Disable scissor test using cached rasterizer state
-    if (g_rsScissorDisabled) {
-        g_context->RSSetState(g_rsScissorDisabled);
-    }
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawStringNative(JNIEnv* env, jclass, jstring str, jfloat x, jfloat y, jfloat r, jfloat g, jfloat b, jfloat a) {
-    // Stub: text rendering not supported (requires textured shaders)
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawImageNative(JNIEnv*, jclass, jfloat x, jfloat y, jfloat w, jfloat h) {
-    // Stub: image rendering not supported (requires textured shaders)
-}
-
-// Initialize textured rendering resources (called on first texture operation)
-static void InitTexturedRendering() {
-    if (g_vsTextured) return; // Already initialized
-    if (!g_device) {
-        fprintf(stderr, "[FastGraphics] InitTexturedRendering: g_device is null!\n");
-        return;
-    }
-    
-    // Compile shaders
-    ID3DBlob* vsBlob = nullptr;
-    ID3DBlob* psBlob = nullptr;
-    
-    if (CompileShader(VS_TEXTURED_SRC, "main", "vs_4_0", &vsBlob)) {
-        g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vsTextured);
-        
-        // Input layout for textured vertices (position + uv)
-        D3D11_INPUT_ELEMENT_DESC layout[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 }
-        };
-        g_device->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_layoutTextured);
-        vsBlob->Release();
-    }
-    
-    if (CompileShader(PS_TEXTURED_SRC, "main", "ps_4_0", &psBlob)) {
-        g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_psTextured);
-        psBlob->Release();
-    }
-    
-    // Create sampler state
-    D3D11_SAMPLER_DESC sampDesc = {};
-    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sampDesc.MinLOD = 0;
-    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
-    g_device->CreateSamplerState(&sampDesc, &g_sampler);
-    
-    // Create static quad vertex buffer (will be updated per draw)
-    float quadVertices[] = {
-        // Position    UV
-        0.0f, 0.0f,   0.0f, 0.0f,
-        1.0f, 0.0f,   1.0f, 0.0f,
-        0.0f, 1.0f,   0.0f, 1.0f,
-        1.0f, 1.0f,   1.0f, 1.0f
-    };
-    
-    D3D11_BUFFER_DESC bd = {};
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.ByteWidth = sizeof(quadVertices);
-    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    g_device->CreateBuffer(&bd, nullptr, &g_texturedVB);
-}
-
-JNIEXPORT jint JNICALL Java_fastgraphics_FastGraphics2D_loadTextureNative(JNIEnv* env, jclass, jintArray pixelData, jint width, jint height) {
-    if (!g_device) {
-        fprintf(stderr, "[FastGraphics] loadTextureNative: g_device is null!\n");
-        return -1;
-    }
-    
-    InitTexturedRendering();
-    
-    jint* pixels = env->GetIntArrayElements(pixelData, nullptr);
-    if (!pixels) return -1;
-
-    // Create texture
-    D3D11_TEXTURE2D_DESC texDesc = {};
-    texDesc.Width = width;
-    texDesc.Height = height;
-    texDesc.MipLevels = 1;
-    texDesc.ArraySize = 1;
-    texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    texDesc.SampleDesc.Count = 1;
-    texDesc.Usage = D3D11_USAGE_IMMUTABLE;
-    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-    D3D11_SUBRESOURCE_DATA initData = {};
-    initData.pSysMem = pixels;
-    initData.SysMemPitch = width * 4;
-    
-    ID3D11Texture2D* texture = nullptr;
-    ID3D11ShaderResourceView* srv = nullptr;
-    
-    HRESULT hrTex = g_device->CreateTexture2D(&texDesc, &initData, &texture);
-    env->ReleaseIntArrayElements(pixelData, pixels, JNI_ABORT);
-
-    if (FAILED(hrTex)) {
-        fprintf(stderr, "[FastGraphics] loadTextureNative: CreateTexture2D FAILED! hr=0x%08X\n", hrTex);
-        return -1;
-    }
-    fprintf(stderr, "[FastGraphics] loadTextureNative: Texture created OK\n");
-
-    HRESULT hrSrv = g_device->CreateShaderResourceView(texture, nullptr, &srv);
-    if (FAILED(hrSrv)) {
-        fprintf(stderr, "[FastGraphics] loadTextureNative: CreateShaderResourceView FAILED! hr=0x%08X\n", hrSrv);
-        texture->Release();
-        return -1;
-    }
-    fprintf(stderr, "[FastGraphics] loadTextureNative: SRV created OK\n");
-
-    // Store in cache
-    int id = g_nextTextureId++;
-    g_textureCache[id] = { texture, srv };
-
-    fprintf(stderr, "[FastGraphics] loadTextureNative: Texture ID %d cached\n", id);
-    return id;
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_unloadTextureNative(JNIEnv*, jclass, jint textureId) {
-    auto it = g_textureCache.find(textureId);
-    if (it != g_textureCache.end()) {
-        if (it->second.srv) it->second.srv->Release();
-        if (it->second.texture) it->second.texture->Release();
-        g_textureCache.erase(it);
-    }
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_drawTexturedQuadNative(JNIEnv*, jclass, jint textureId, jfloat x, jfloat y, jfloat w, jfloat h) {
-    fprintf(stderr, "[drawTexturedQuad] textureId=%d, x=%.2f, y=%.2f, w=%.2f, h=%.2f\n", textureId, x, y, w, h);
-    
-    if (!g_device || !g_context) {
-        fprintf(stderr, "[drawTexturedQuad] ERROR: g_device or g_context is null\n");
-        return;
-    }
-    
-    auto it = g_textureCache.find(textureId);
-    if (it == g_textureCache.end()) {
-        fprintf(stderr, "[drawTexturedQuad] ERROR: textureId %d not found in cache\n", textureId);
-        return;
-    }
-    fprintf(stderr, "[drawTexturedQuad] texture found in cache\n");
-    
-    D3D11_VIEWPORT vp; UINT num = 1;
-    g_context->RSGetViewports(&num, &vp);
-    
-    // Ensure screen constant buffer exists
-    if (!g_screenCB) {
-        D3D11_BUFFER_DESC cbd = {};
-        cbd.Usage = D3D11_USAGE_DYNAMIC;
-        cbd.ByteWidth = 16;
-        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        g_device->CreateBuffer(&cbd, nullptr, &g_screenCB);
-    }
-    
-    // Update vertex buffer with quad positions
-    float vertices[] = {
-        // Position      UV
-        x,     y,       0.0f, 0.0f,
-        x + w, y,       1.0f, 0.0f,
-        x,     y + h,  0.0f, 1.0f,
-        x + w, y + h,  1.0f, 1.0f
-    };
-    
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(g_context->Map(g_texturedVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        memcpy(mapped.pData, vertices, sizeof(vertices));
-        g_context->Unmap(g_texturedVB, 0);
-    }
-    
-    // Update screen constant buffer
-    D3D11_MAPPED_SUBRESOURCE cbMapped;
-    if (SUCCEEDED(g_context->Map(g_screenCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &cbMapped))) {
-        float* cbData = (float*)cbMapped.pData;
-        cbData[0] = (float)vp.Width;
-        cbData[1] = (float)vp.Height;
-        g_context->Unmap(g_screenCB, 0);
-    }
-    
-    // Set render state
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-    g_context->VSSetShader(g_vsTextured, nullptr, 0);
-    g_context->VSSetConstantBuffers(0, 1, &g_screenCB);
-    g_context->PSSetShader(g_psTextured, nullptr, 0);
-    g_context->PSSetShaderResources(0, 1, &it->second.srv);
-    g_context->PSSetSamplers(0, 1, &g_sampler);
-    g_context->IASetInputLayout(g_layoutTextured);
-    
-    UINT stride = 16; // 4 floats per vertex
-    UINT offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_texturedVB, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    
-    // Draw
-    g_context->Draw(4, 0);
-    
-    // Unbind texture to avoid conflicts with other shaders
-    ID3D11ShaderResourceView* nullSrv = nullptr;
-    g_context->PSSetShaderResources(0, 1, &nullSrv);
-}
-
-JNIEXPORT void JNICALL Java_fastgraphics_FastGraphics2D_init(JNIEnv*, jclass, jlong hwnd) {
-    fprintf(stderr, "[FastGraphics] init called with hwnd=%lld\n", hwnd);
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-    if (g_device) {
-        fprintf(stderr, "[FastGraphics] g_device initialized OK\n");
-    } else {
-        fprintf(stderr, "[FastGraphics] ERROR: g_device is NULL!\n");
-    }
-}
-
-JNIEXPORT void JNICALL Java_demo_BenchmarkApp_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_BenchmarkApp_fillRect(JNIEnv*, jclass, float x, float y, float w, float h, float r, float g, float b) {
-    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_BenchmarkApp_clear(JNIEnv*, jclass, float r, float g, float b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_BenchmarkApp_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_BenchmarkApp_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_Benchmark_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_Benchmark_fillRects(JNIEnv* env, jclass, jobject data, jint count) {
-    Java_demo_DemoApp_fillRects(env, nullptr, data, count);
-}
-
-JNIEXPORT void JNICALL Java_demo_Benchmark_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_Benchmark_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_Benchmark_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_Comparator_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_Comparator_fillRects(JNIEnv* env, jclass, jobject data, jint count) {
-    Java_demo_DemoApp_fillRects(env, nullptr, data, count);
-}
-
-JNIEXPORT void JNICALL Java_demo_Comparator_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_Comparator_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_Comparator_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawRectTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawRectTest_drawRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawRectTest_fillRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    static int callCount = 0;
-    callCount++;
-    if (callCount <= 3) {
-        printf("[DrawRectTest_fillRect] #%d: (%.0f,%.0f,%.0f,%.0f) color(%.2f,%.2f,%.2f)\n", callCount, x, y, w, h, r, g, b);
-    }
-
-    if (!g_device) {
-        printf("[DrawRectTest_fillRect] ERROR: g_device is null!\n");
-        return;
-    }
-
-    D3D11_VIEWPORT vp; UINT num = 1; g_context->RSGetViewports(&num, &vp);
-    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-    // Set shaders
-    g_context->VSSetShader(g_vs, nullptr, 0);
-    g_context->PSSetShader(g_ps, nullptr, 0);
-    g_context->IASetInputLayout(g_layout);
-
-    float x1 = ToNDC_X(x, vp.Width), y1 = ToNDC_Y(y, vp.Height);
-    float x2 = ToNDC_X(x + w, vp.Width), y2 = ToNDC_Y(y + h, vp.Height);
-
-    float vertices[] = {
-        x1, y1, r, g, b, 1.0f,
-        x2, y1, r, g, b, 1.0f,
-        x1, y2, r, g, b, 1.0f,
-        x1, y2, r, g, b, 1.0f,
-        x2, y1, r, g, b, 1.0f,
-        x2, y2, r, g, b, 1.0f
-    };
-
-    if (g_vb) g_vb->Release();
-    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER };
-    D3D11_SUBRESOURCE_DATA sd = { vertices };
-    g_device->CreateBuffer(&bd, &sd, &g_vb);
-
-    UINT stride = 24, offset = 0;
-    g_context->IASetVertexBuffers(0, 1, &g_vb, &stride, &offset);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_context->Draw(6, 0);
-    printf("[DrawRectTest_fillRect] Draw called, NDC: (%.2f,%.2f) to (%.2f,%.2f)\n", x1, y1, x2, y2);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawRectTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawRectTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_DrawRectTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawOvalTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawOvalTest_fillOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillOvalNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawOvalTest_drawOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawOvalNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawOvalTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawOvalTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_DrawOvalTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawLineTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawLineTest_drawLineNative(JNIEnv*, jclass,
-    jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawLineNative(nullptr, nullptr, x1, y1, x2, y2, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawLineTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawLineTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_DrawLineTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_drawPolygonNative(JNIEnv* env, jclass,
-    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawPolygonNative(env, nullptr, xPoints, yPoints, nPoints, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_fillPolygonNative(JNIEnv* env, jclass,
-    jfloatArray xPoints, jfloatArray yPoints, jint nPoints, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillPolygonNative(env, nullptr, xPoints, yPoints, nPoints, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawPolygonTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_DrawPolygonTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawArcTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawArcTest_drawArcNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawArcNative(nullptr, nullptr, x, y, w, h, startAngle, arcAngle, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawArcTest_fillArcNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat startAngle, jfloat arcAngle, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillArcNative(nullptr, nullptr, x, y, w, h, startAngle, arcAngle, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawArcTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawArcTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_DrawArcTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_fillRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillRectNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_translateNative(JNIEnv*, jclass, jfloat tx, jfloat ty) {
-    Java_fastgraphics_FastGraphics2D_translateNative(nullptr, nullptr, tx, ty);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_scaleNative(JNIEnv*, jclass, jfloat sx, jfloat sy) {
-    Java_fastgraphics_FastGraphics2D_scaleNative(nullptr, nullptr, sx, sy);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_rotateNative(JNIEnv*, jclass, jfloat angle) {
-    Java_fastgraphics_FastGraphics2D_rotateNative(nullptr, nullptr, angle);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_resetTransformNative(JNIEnv*, jclass) {
-    Java_fastgraphics_FastGraphics2D_resetTransformNative(nullptr, nullptr);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransformTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_TransformTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_drawOvalNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawOvalNative(nullptr, nullptr, x, y, w, h, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_drawLineNative(JNIEnv*, jclass,
-    jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawLineNative(nullptr, nullptr, x1, y1, x2, y2, r, g, b, 1.0f);
-}
-
-JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_setAntiAliasingNative(JNIEnv*, jclass, jboolean enabled) {
-    Java_fastgraphics_FastGraphics2D_setAntiAliasingNative(nullptr, nullptr, enabled);
-}
-
-JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_AntiAliasingTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_AntiAliasingTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
+    // AWT drawString(x, y) uses y as the baseline.
+    // D2D DrawText uses y as the top.
+    // Approximate ascent as 80% of size for Segoe UI.
+    float adjustedY = y - (size * 0.8f);
 
-JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_drawRoundRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_drawRoundRectNative(nullptr, nullptr, x, y, w, h, arcWidth, arcHeight, r, g, b, 1.0f);
+    g_d2dContext->BeginDraw();
+    if (g_textBrush) g_textBrush->SetColor(D2D1::ColorF(r, g, b, a));
+    g_d2dContext->DrawText((const WCHAR*)jstr, len, format, D2D1::RectF(x, adjustedY, x + 2000, adjustedY + 1000), g_textBrush);
+    g_d2dContext->EndDraw();
+    format->Release(); env->ReleaseStringChars(text, jstr);
 }
 
-JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_fillRoundRectNative(JNIEnv*, jclass,
-    jfloat x, jfloat y, jfloat w, jfloat h, jfloat arcWidth, jfloat arcHeight, jfloat r, jfloat g, jfloat b) {
-    Java_fastgraphics_FastGraphics2D_fillRoundRectNative(nullptr, nullptr, x, y, w, h, arcWidth, arcHeight, r, g, b, 1.0f);
+JNIEXPORT jint JNICALL Java_fastgraphics_FastGraphicsEngine_loadTexture(JNIEnv* env, jobject, jintArray pixels, jint w, jint h) {
+    jint* data = env->GetIntArrayElements(pixels, NULL);
+    D3D11_TEXTURE2D_DESC td = { (UINT)w, (UINT)h, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_IMMUTABLE, D3D11_BIND_SHADER_RESOURCE };
+    D3D11_SUBRESOURCE_DATA sd = { data, (UINT)(w * 4) };
+    ID3D11Texture2D* tex; g_device->CreateTexture2D(&td, &sd, &tex);
+    env->ReleaseIntArrayElements(pixels, data, JNI_ABORT);
+    ID3D11ShaderResourceView* srv; g_device->CreateShaderResourceView(tex, NULL, &srv);
+    tex->Release(); int id = g_nextTextureId++; g_textures[id] = { srv, w, h }; return id;
 }
 
-JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_destroyTexture(JNIEnv*, jobject, jint id) {
+    if (g_textures.count(id)) { g_textures[id].srv->Release(); g_textures.erase(id); }
 }
 
-JNIEXPORT void JNICALL Java_demo_DrawRoundRectTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
+JNIEXPORT void JNICALL Java_fastgraphics_FastGraphicsEngine_drawImage(JNIEnv* env, jobject, jint textureId, jfloat x, jfloat y, jfloat w, jfloat h, jfloat alpha) {
+    if (!g_textures.count(textureId)) return;
+    TextureEntry& entry = g_textures[textureId];
+    g_context->PSSetShaderResources(0, 1, &entry.srv);
+    ID3D11SamplerState* samplers[] = { g_aaEnabled ? g_samplerLinear : g_samplerPoint };
+    g_context->PSSetSamplers(0, 1, samplers);
+    InstanceData inst = { {x, y}, {w, h}, {1,1,1,1}, {0, alpha, 9, 0} };
+    D3D11_MAPPED_SUBRESOURCE ms; g_context->Map(g_instanceVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
+    memcpy(ms.pData, &inst, sizeof(InstanceData)); g_context->Unmap(g_instanceVB, 0);
+    g_context->DrawInstanced(4, 1, 0, 0);
 }
 
-JNIEXPORT jlong JNICALL Java_demo_DrawRoundRectTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
 }
-
-JNIEXPORT void JNICALL Java_demo_TVTestPattern_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_TVTestPattern_fillRects(JNIEnv* env, jclass, jobject data, jint count) {
-    Java_demo_DemoApp_fillRects(env, nullptr, data, count);
-}
-
-JNIEXPORT void JNICALL Java_demo_TVTestPattern_drawCircles(JNIEnv* env, jclass, jobject data, jint count) {
-    Java_demo_DemoApp_drawCircles(env, nullptr, data, count);
-}
-
-JNIEXPORT void JNICALL Java_demo_TVTestPattern_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_TVTestPattern_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_TVTestPattern_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransparencyTest_init(JNIEnv*, jclass, jlong hwnd) {
-    Java_demo_DemoApp_init(nullptr, nullptr, hwnd);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransparencyTest_clear(JNIEnv*, jclass, jfloat r, jfloat g, jfloat b) {
-    Java_demo_DemoApp_clear(nullptr, nullptr, r, g, b);
-}
-
-JNIEXPORT void JNICALL Java_demo_TransparencyTest_present(JNIEnv*, jclass) {
-    Java_demo_DemoApp_present(nullptr, nullptr);
-}
-
-JNIEXPORT jlong JNICALL Java_demo_TransparencyTest_findWindow(JNIEnv* env, jclass, jstring title) {
-    return Java_demo_DemoApp_findWindow(env, nullptr, title);
-}
-
-} // extern "C"
