@@ -1,13 +1,10 @@
-# FastGraphics — High-Performance GPU-Accelerated Graphics2D (600% Faster than Java2D)
+# FastGraphics 0.1.0 [ALPHA] — High-Performance GPU-Accelerated Graphics2D
 
-> **🎨 MAJOR UPDATE** - Alpha Transparency & Rounded Rectangles now fully implemented! See [TODO.md](TODO.md) for remaining features.
-
-**⚡ Ultra-fast GPU-accelerated Graphics2D replacement for Java — 600% faster than java.awt.Graphics2D / Java2D**
-
-[![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
+[![Status](https://img.shields.io/badge/status-0.1.0-brightgreen.svg)](https://github.com/andrestubbe/FastGraphics/releases/tag/0.1.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Java](https://img.shields.io/badge/Java-17+-blue.svg)](https://www.java.com)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010+-lightgrey.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![JitPack](https://img.shields.io/badge/JitPack-ready-green.svg)](https://jitpack.io/#andrestubbe/FastGraphics)
 
 <!-- TODO: Add benchmark image here when available -->
 <!-- ![FastGraphics vs Java2D Benchmark](docs/test-pattern-comparison.png) -->

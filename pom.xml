@@ -5,9 +5,9 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.andrestubbe</groupId>
-    <artifactId>fastgraphics</artifactId>
-    <version>1.0.0-beta</version>
+    <groupId>com.github.andrestubbe</groupId>
+    <artifactId>FastGraphics</artifactId>
+    <version>0.1.0</version>
     <packaging>jar</packaging>
 
     <name>FastGraphics</name>
