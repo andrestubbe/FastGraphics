@@ -1,3 +1,6 @@
+> [!WARNING]
+> **🚧 WIP — Active Rendering Pipeline Refactoring & DirectX 11 / Vulkan Modernization in Progress.**
+
 # FastGraphics 0.1.0 [ALPHA] — High-Performance GPU-Accelerated Graphics2D
 
 [![Status](https://img.shields.io/badge/status-0.1.0-brightgreen.svg)](https://github.com/andrestubbe/FastGraphics/releases/tag/0.1.0)
