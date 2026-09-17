@@ -10,7 +10,7 @@ import java.awt.image.BufferedImage;
  * 
  * OPTIMIERT: Pooled FloatBuffer - kein "new" pro Frame!
  */
-public class DemoApp {
+public class Demo {
     
     private static final int WIDTH = 800;
     private static final int HEIGHT = 600;

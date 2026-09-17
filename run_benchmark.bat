@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\andre\Documents\2026-04-08-Work-FastGraphics\out"
+cd /d "%~dp0out"
 
 if not exist "FastGraphics.dll" (
     echo.

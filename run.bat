@@ -9,4 +9,4 @@ if not exist "out\FastGraphics.dll" (
 )
 
 cd out
-java -cp . -Djava.library.path=. demo.DemoApp
+java -cp . -Djava.library.path=. demo.Demo
