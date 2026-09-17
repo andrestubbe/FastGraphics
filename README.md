@@ -1,4 +1,4 @@
-﻿> [!WARNING]
+> [!WARNING]
 > **🚧 WIP — Active Rendering Pipeline Refactoring & DirectX 11 / Vulkan Modernization in Progress.**
 
 # FastGraphics 0.1.0 [ALPHA] — High-Performance GPU-Accelerated Graphics2D for Java
@@ -137,27 +137,27 @@ Benchmark.benchmarkJava2DFillRect            thrpt    3   118.230 ±  14.120  op
 
 ## API Quick Reference
 
-| Method | Description | Status |
-|:---|:---|:---:|
-| `new FastGraphics2D(hwnd)` | Creates hardware-accelerated rendering context for native window | ✅ Implemented |
-| `setColor(Color c)` | Sets current drawing color (RGB / ARGB with alpha) | ✅ Implemented |
-| `fillRect(x, y, w, h)` | Fills rectangle (batched GPU draw call) | ✅ Implemented |
-| `fillOval(x, y, w, h)` | Fills oval or circle | ✅ Implemented |
-| `drawRect(x, y, w, h)` | Draws outline rectangle | ✅ Implemented |
-| `drawOval(x, y, w, h)` | Draws outline oval or circle | ✅ Implemented |
-| `drawLine(x1, y1, x2, y2)` | Draws 2D line segment | ✅ Implemented |
-| `drawRoundRect(x, y, w, h, rw, rh)` | Draws outline rounded rectangle | ✅ Implemented |
-| `fillRoundRect(x, y, w, h, rw, rh)` | Fills rounded rectangle with corner radii | ✅ Implemented |
-| `drawPolygon(xPoints, yPoints)` | Draws outline polygon | ✅ Implemented |
-| `fillPolygon(xPoints, yPoints)` | Fills convex polygon | ✅ Implemented |
-| `drawImage(img, x, y, w, h)` | Draws image with GPU texture caching | ✅ Implemented |
-| `setClip(x, y, w, h)` | Configures hardware scissor rectangle clipping | ✅ Implemented |
-| `resetClip()` | Clears clipping rectangle | ✅ Implemented |
-| `translate(tx, ty)` | Applies translation matrix | ✅ Implemented |
-| `scale(sx, sy)` | Applies scale matrix | ✅ Implemented |
-| `rotate(angle)` | Applies rotation matrix | ✅ Implemented |
-| `clear()` / `clear(Color c)` | Clears background color buffer | ✅ Implemented |
-| `present()` | Flushes queued batches and presents swapchain frame | ✅ Implemented |
+| Method / Class | Return Type | Description |
+|:---|:---|:---|
+| `new FastGraphics2D(hwnd)` | `FastGraphics2D` | Creates hardware-accelerated rendering context for native window. |
+| `g.setColor(Color c)` | `void` | Sets current drawing color (RGB / ARGB with alpha). |
+| `g.fillRect(x, y, w, h)` | `void` | Fills rectangle (batched GPU draw call). |
+| `g.fillOval(x, y, w, h)` | `void` | Fills oval or circle. |
+| `g.drawRect(x, y, w, h)` | `void` | Draws outline rectangle. |
+| `g.drawOval(x, y, w, h)` | `void` | Draws outline oval or circle. |
+| `g.drawLine(x1, y1, x2, y2)` | `void` | Draws 2D line segment. |
+| `g.drawRoundRect(x, y, w, h, rw, rh)` | `void` | Draws outline rounded rectangle. |
+| `g.fillRoundRect(x, y, w, h, rw, rh)` | `void` | Fills rounded rectangle with corner radii. |
+| `g.drawPolygon(xPoints, yPoints)` | `void` | Draws outline polygon. |
+| `g.fillPolygon(xPoints, yPoints)` | `void` | Fills convex polygon. |
+| `g.drawImage(img, x, y, w, h)` | `void` | Draws image with GPU texture caching. |
+| `g.setClip(x, y, w, h)` | `void` | Configures hardware scissor rectangle clipping. |
+| `g.resetClip()` | `void` | Clears clipping rectangle. |
+| `g.translate(tx, ty)` | `void` | Applies translation matrix. |
+| `g.scale(sx, sy)` | `void` | Applies scale matrix. |
+| `g.rotate(angle)` | `void` | Applies rotation matrix. |
+| `g.clear()` / `g.clear(Color c)` | `void` | Clears background color buffer. |
+| `g.present()` | `void` | Flushes queued batches and presents swapchain frame. |
 
 ---
 
