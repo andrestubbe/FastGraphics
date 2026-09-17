@@ -218,6 +218,10 @@ dependencies {
 
 ## Documentation
 
+- **[REFERENCE.md](docs/REFERENCE.md)**: Full API contracts, JNI signatures, and memory layouts.
+- **[PHILOSOPHY.md](docs/PHILOSOPHY.md)**: GPU-first, zero-allocation, and single-draw-call architectural principles.
+- **[ROADMAP.md](docs/ROADMAP.md)**: Future milestones (Vulkan 2D, Metal, and GPU SDF font rasterization).
+- **[CHANGELOG.md](docs/CHANGELOG.md)**: Version history, release notes, and migration guides.
 - **[COMPILE.md](docs/COMPILE.md)**: Native C++ DirectX 11 backend compilation guide and build scripts.
 
 ---
