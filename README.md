@@ -63,6 +63,13 @@ FastGraphics solves this with:
 - **Zero GC pressure** — direct ByteBuffers, pooled resources
 - **Drop-in API** — familiar Graphics2D-style methods
 
+| Feature | java.awt.Graphics2D | JavaFX GraphicsContext | FastGraphics |
+|:---|:---|:---|:---|
+| **Render Backend** | Java2D (CPU rasterizer / GDI)| Prism (OpenGL / D3D9) | **DirectX 11 / Vulkan native GPU** |
+| **Draw Call Model** | Immediate per-shape CPU call | Retained node graph overhead | **Single-draw-call automatic batching** |
+| **Max Shapes @ 60 FPS** | ~1,000 shapes | ~5,000 shapes | **50,000+ shapes (> 1,000 FPS)** |
+| **Instanced Rendering** | Not supported | Not supported | **76% less GPU bandwidth via instancing** |
+
 ---
 
 ## Performance Benchmarks
