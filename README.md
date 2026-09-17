@@ -63,8 +63,7 @@ public class Demo {
 - [API Quick Reference](#api-quick-reference)
 - [Technical Demos & Benchmarks](#technical-demos--benchmarks)
 - [Installation](#installation)
-- [TV Test Pattern Demo](#tv-test-pattern-demo)
-- [Build from Source](#build-from-source)
+- [Documentation](#documentation)
 - [Platform Support](#platform-support)
 - [License](#license)
 - [Related Projects](#related-projects)
@@ -193,6 +192,11 @@ Add the JitPack repository and dependency to your `pom.xml`:
         <artifactId>FastGraphics</artifactId>
         <version>0.1.0</version>
     </dependency>
+    <dependency>
+        <groupId>com.github.andrestubbe</groupId>
+        <artifactId>FastCore</artifactId>
+        <version>0.1.0</version>
+    </dependency>
 </dependencies>
 ```
 
@@ -206,40 +210,31 @@ repositories {
 
 dependencies {
     implementation 'com.github.andrestubbe:FastGraphics:0.1.0'
+    implementation 'com.github.andrestubbe:FastCore:0.1.0'
 }
 ```
 
 ---
 
-## TV Test Pattern Demo
+## Documentation
 
-FastGraphics includes an 80s TV Test Pattern visual validation suite (`demo.Comparator`) comparing Java2D and FastGraphics DirectX:
-- ✅ Color accuracy (Color Bars)
-- ✅ Geometric precision (Convergence Circles)
-- ✅ Gradient rendering (Shade Bars)
-- ✅ Text & boundary alignment
-
----
-
-## Build from Source
-
-See [COMPILE.md](COMPILE.md) for detailed native C++ and DirectX build instructions.
+- **[COMPILE.md](docs/COMPILE.md)**: Native C++ DirectX 11 backend compilation guide and build scripts.
 
 ---
 
 ## Platform Support
 
-| Platform | Status | Backend |
-|:---|:---:|:---|
-| Windows 10/11 | ✅ Fully Supported | DirectX 11 / DXGI |
-| Linux | 🔗 Planned | Vulkan / OpenGL |
-| macOS | 🔗 Planned | Metal |
+| Platform | Architecture | Status | Notes |
+|:---|:---|:---|:---|
+| Windows 10/11 | x64, ARM64 | ✅ Fully Supported | Direct Win32 / DirectX 11 hardware swapchain |
+| Linux | x64, ARM64 | 🚧 Planned | Vulkan / OpenGL backend |
+| macOS | Apple Silicon, x64 | 🚧 Planned | Metal backend |
 
 ---
 
 ## License
 
-MIT License — Free for commercial and personal use. See [LICENSE](LICENSE) for details.
+MIT License — See [LICENSE](LICENSE) file for details.
 
 ---
 
