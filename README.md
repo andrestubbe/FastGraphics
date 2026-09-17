@@ -168,8 +168,8 @@ Run standalone verification demos or execute JMH throughput benchmarks:
 | Type | Target / Launcher | Source File | Description |
 | :--- | :--- | :--- | :--- |
 | **Interactive Demo** | [`run-demo.bat`](run-demo.bat) | [`Demo.java`](src/demo/Demo.java) | 10,000 particle simulation and real-time DirectX 11 vs AWT comparison |
-| **Throughput Benchmark** | [`run-benchmark.bat`](run-benchmark.bat) | [`Benchmark.java`](examples/Benchmark/src/main/java/fastgraphics/benchmark/Benchmark.java) | JMH benchmark evaluating batched fillRect throughput |
 | **TV Test Pattern Demo** | [`run_imagezoom.bat`](run_imagezoom.bat) | [`Comparator.java`](src/demo/Comparator.java) | Side-by-side pixel-perfect calibration test pattern |
+| **Throughput Benchmark** | [`run-benchmark.bat`](run-benchmark.bat) | [`Benchmark.java`](examples/Benchmark/src/main/java/fastgraphics/benchmark/Benchmark.java) | JMH benchmark evaluating batched fillRect throughput |
 
 ---
 
